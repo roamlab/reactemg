@@ -153,6 +153,6 @@ For questions or support, please email Runsheng at runsheng.w@columbia.edu
 ## :scroll: License
 This project is released under the MIT License; see the [License](LICENSE) file for full details.
 
-## :handshake: Acknowledgment
+## :handshake: Acknowledgments
 This work was supported in part by an Amazon Research Award and the Columbia University Data Science Institute Seed Program. Ava Chen was supported by NIH grant 1F31HD111301-01A1. The views and conclusions contained herein are those of the authors and should not be interpreted as necessarily representing the official policies, either expressed or implied, of the sponsors. We would like to thank Katelyn Lee, Eugene Sohn, Do-Gon Kim, and Dilara Baysal for their assistance with the hand orthosis hardware. We thank Zhanpeng He and Gagan Khandate for their helpful feedback and insightful discussions.
 
