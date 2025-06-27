@@ -1,0 +1,3 @@
+[submodule "minLoRA"]
+	path = minLoRA
+	url = git@github.com:changjonathanc/minLoRA.git

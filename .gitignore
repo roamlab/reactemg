@@ -1,0 +1,6 @@
+# Ignore folders
+data/
+wandb/
+model_checkpoints/
+output/
+__pycache__/
