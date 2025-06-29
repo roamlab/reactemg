@@ -87,7 +87,7 @@ python3 main.py \
   --exp_name <RUN_ID>
 ```
 
-Replace <RUN_ID> with your desired name, and the script will save checkpoints to `model_checkpoints/<RUN_ID>_<timestamp>_<machine_name>/epoch_<N>.pth`, where <timestamp> records the run’s start time and <machine_name> identifies the host. Ensure you have write permission where you launch the job.
+Replace <RUN_ID> with your desired name, and the script will save checkpoints to `model_checkpoints/<RUN_ID>_<timestamp>_<machine_name>/epoch_<N>.pth`, where `<timestamp>` records the run’s start time and `<machine_name>` identifies the host. Ensure you have write permission where you launch the job.
 
 You may also initialize weights from a saved checkpoint by adding `--saved_checkpoint_pth path/to/epoch_X.pth` to the training command. If you wish to fine-tune a model via LoRA, provide the flag `--use_lora 1`, in addition to the locally saved checkpoint path.
 
