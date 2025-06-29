@@ -54,7 +54,7 @@ curl -L -o data.zip "https://www.dropbox.com/scl/fi/isj4450alriqjfstkna2s/data.z
 
 ### Logging
 
-We use wandb to track experiments. Decide whether you want metrics online or offline:
+We use W&B to track experiments. Decide whether you want metrics online or offline:
 
 ```bash
 # online (default) – set once in your shell
@@ -86,15 +86,17 @@ python3 main.py \
   --inner_window_size 600 \
   --exp_name <RUN_ID>
 ```
-If this is your first time using wandb on the host machine, you will be prompted to provide credential
+
+If this is your first time using W&B on the host machine, you will be prompted to provide credentials:
 
 ```text
 wandb: (1) Create a W&B account
 wandb: (2) Use an existing W&B account
 wandb: (3) Don't visualize my results
-wandb: Enter your choice: 2
+wandb: Enter your choice: 
 ```
 
+Enter `2` to use your W&B account, and follow the prompts to provide your API key.
 
 Replace <RUN_ID> with your desired name. The script writes to `model_checkpoints/<exp_name>/epoch_<N>.pth` every epoch. If you supply `--exp_name <RUN_ID>` it re-uses that folder; otherwise it autogenerates one. Make sure you have write permission where you launch the job.
 
