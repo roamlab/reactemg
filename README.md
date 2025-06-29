@@ -44,7 +44,7 @@ We are open-sourcing our own sEMG dataset, **ROAM-EMG**.
 - **Download:** [Dropbox Link](<https://www.dropbox.com/scl/fi/19zvl12vn27wsnzsmw0vx/ROAM_EMG.zip?rlkey=x6gtygdfz24i8efdswr1exii7&st=ljzuoire&dl=0>)  
 
 ### 2. Pre-processed public datasets  
-For full reproducibility, we also provide pre-processed versions of every public EMG dataset used in the paper. The file structures and data formats have been aligned with ROAM-EMG. We recommend organizing all datasets under the `data/` folder under `reactemg/`. To download all datasets (including ROAM-EMG): 
+For full reproducibility, we also provide pre-processed versions of every public EMG dataset used in the paper. The file structures and data formats have been aligned with ROAM-EMG. We recommend organizing all datasets under the `data/` folder (automatically created when unzipping) in the root directory of the repo. To download all datasets (including ROAM-EMG): 
 
 ```bash
 curl -L -o data.zip "https://www.dropbox.com/scl/fi/isj4450alriqjfstkna2s/data.zip?rlkey=n5sf910lopskewzyae0vgn6j7&st=vt89hfpj&dl=1" && unzip data.zip && rm data.zip
