@@ -42,7 +42,7 @@ minLorRA was built for editable install with `setup.py develop`, which is deprec
 
 ### 1. ROAM-EMG 
 We are open-sourcing our own sEMG dataset, **ROAM-EMG**.  
-- **Scope:** Using the Thalmic Myo armband, we recorded eight-channel sEMG signals from 28 participants as they performed gestures in four arm postures, with two grasping tasks and three types of arm movement. Full details of the dataset are provided in our paper and its supplementary materials.
+- **Scope:** Using the Thalmic Myo armband, we recorded eight-channel sEMG signals from 28 participants as they performed hand gestures in four arm postures, with two grasping tasks and three types of arm movement. Full details of the dataset are provided in our paper and its supplementary materials.
 - **Download:** [Dropbox Link](<https://www.dropbox.com/scl/fi/19zvl12vn27wsnzsmw0vx/ROAM_EMG.zip?rlkey=x6gtygdfz24i8efdswr1exii7&st=ljzuoire&dl=0>)  
 
 ### 2. Pre-processed public datasets  
