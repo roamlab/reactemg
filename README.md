@@ -28,9 +28,7 @@ Clone the repo with `--recurse-submodules` and install our conda (mamba) environ
 mamba env create -f environment.yml
 ```
 
-Install the version of [PyTorch](<https://pytorch.org/get-started/locally/>) that matches the CUDA toolkit supported by your NVIDIA GPU.
-
-After installing PyTorch, install minLoRA via:
+Install [PyTorch](<https://pytorch.org/get-started/locally/>) in the conda environment, then install minLoRA via:
 
 ```bash
 cd minLoRA && pip install -e .
