@@ -28,7 +28,13 @@ Clone the repo with `--recurse-submodules` and install our conda (mamba) environ
 mamba env create -f environment.yml
 ```
 
-Install [PyTorch](<https://pytorch.org/get-started/locally/>) in the conda environment, then install minLoRA via:
+Install [PyTorch](<https://pytorch.org/get-started/locally/>) in the conda environment, then install wandb via pip:
+
+```bash
+pip install wandb
+```
+
+Lastly, install minLoRA via:
 
 ```bash
 cd minLoRA && pip install -e .
