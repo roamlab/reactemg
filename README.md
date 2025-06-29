@@ -87,6 +87,10 @@ python3 main.py \
   --exp_name <RUN_ID>
 ```
 
+Replace <RUN_ID> with your desired name. The script writes to `model_checkpoints/<exp_name>/epoch_<N>.pth` every epoch. If you supply `--exp_name <RUN_ID>` it re-uses that folder; otherwise it autogenerates one. Make sure you have write permission where you launch the job.
+
+You may also initialize weights from a saved checkpoint by adding `--saved_checkpoint_pth path/to/epoch_X.pth` to the training command. If you wish to fine-tune a model via LoRA, provide the flag `--use_lora 1`, in addition to the locally saved checkpoint path.
+
 If this is your first time using W&B on your machine, you will be prompted to provide credentials:
 
 ```text
@@ -97,10 +101,6 @@ wandb: Enter your choice:
 ```
 
 Enter `2` to use your W&B account, and follow the prompts to provide your API key.
-
-Replace <RUN_ID> with your desired name. The script writes to `model_checkpoints/<exp_name>/epoch_<N>.pth` every epoch. If you supply `--exp_name <RUN_ID>` it re-uses that folder; otherwise it autogenerates one. Make sure you have write permission where you launch the job.
-
-You may also initialize weights from a saved checkpoint by adding `--saved_checkpoint_pth path/to/epoch_X.pth` to the training command. If you wish to fine-tune a model via LoRA, provide the flag `--use_lora 1`, in addition to the locally saved checkpoint path.
 
 ### Fine-tuning on ROAM-EMG
 
