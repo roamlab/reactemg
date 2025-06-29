@@ -22,18 +22,18 @@ Columbia University
 ReactEMG is a zero-shot, low-latency EMG framework that segments forearm signals in real time to predict hand gestures at every timestep, delivering calibration-free, high-accuracy intent detection ideal for controlling prosthetic and robotic devices.
 
 ## :package: Installation
-Clone the repo with the `--recurse-submodules` flag and install our conda (mamba) environment on an Ubuntu machine with a Nvidia GPU. We use Ubuntu 24.04 LTS and Python 3.11. 
+Clone the repo with the `--recurse-submodules` flag and install our conda (mamba) environment on an Ubuntu machine with a NVIDIA GPU. We use Ubuntu 24.04 LTS and Python 3.11. 
 
-```console
-$ mamba env create -f environment.yml
+```bash
+mamba env create -f environment.yml
 ```
 
 Install the version of [PyTorch](<https://pytorch.org/get-started/locally/>) that matches the CUDA toolkit supported by your NVIDIA GPU.
 
-minLoRA needs to be installed separately via:
+After installing PyTorch, install minLoRA via:
 
-```console
-$ cd minLoRA && pip install -e .
+```bash
+cd minLoRA && pip install -e .
 ```
 
 minLorRA was built for editable install with `setup.py develop`, which is deprecated. pip&ge25.3 will refuse to use `setup.py develop`
@@ -48,8 +48,8 @@ We are open-sourcing our own sEMG dataset, **ROAM-EMG**.
 ### 2. Pre-processed public datasets  
 For full reproducibility, we also provide pre-processed versions of every public EMG dataset used in the paper. The file structures and data formats have been aligned with ROAM-EMG. We recommend organizing all datasets under the `data/` folder in `reactemg`. To download all datasets (including ROAM-EMG): 
 
-```console
-$ curl -L -o data.zip "https://www.dropbox.com/scl/fi/isj4450alriqjfstkna2s/data.zip?rlkey=n5sf910lopskewzyae0vgn6j7&st=vt89hfpj&dl=1"
+```bash
+curl -L -o data.zip "https://www.dropbox.com/scl/fi/isj4450alriqjfstkna2s/data.zip?rlkey=n5sf910lopskewzyae0vgn6j7&st=vt89hfpj&dl=1"
 ```
 
 ## :hammer_and_wrench: Training
@@ -60,11 +60,11 @@ We use Wandb to track experiments. Decide whether you want metrics online or off
 
 ```bash
 # online (default) – set once in your shell
-$ export WANDB_PROJECT=my-emg-project
-$ export WANDB_ENTITY=<your-wandb-username>
+export WANDB_PROJECT=my-emg-project
+export WANDB_ENTITY=<your-wandb-username>
 
 # or completely disable
-$ export WANDB_MODE=disabled
+export WANDB_MODE=disabled
 ```
 
 ### Pre-training with public datasets
@@ -72,7 +72,7 @@ $ export WANDB_MODE=disabled
 Use the following command to pre-train our model on EMG-EPN-612 and other public datasets:
 
 ```bash
-$ python3 main.py \
+python3 main.py \
   --embedding_method linear_projection \
   --use_input_layernorm \
   --task_selection 0 1 2 \
@@ -86,10 +86,10 @@ $ python3 main.py \
   --epn_subset_percentage 1.0 \
   --model_choice any2any \
   --inner_window_size 600 \
-  --exp_name <run_id>
+  --exp_name <RUN_ID>
 ```
 
-Replace <run_id> with your desired name. The script writes to `model_checkpoints/<exp_name>/epoch_<N>.pth` every epoch. If you supply `--exp_name <run_id>` it re-uses that folder; otherwise it autogenerates one. Make sure you have write permission where you launch the job.
+Replace <RUN_ID> with your desired name. The script writes to `model_checkpoints/<exp_name>/epoch_<N>.pth` every epoch. If you supply `--exp_name <RUN_ID>` it re-uses that folder; otherwise it autogenerates one. Make sure you have write permission where you launch the job.
 
 You may also initialize weights from a saved checkpoint by adding `--saved_checkpoint_pth path/to/epoch_X.pth` to the training command. If you wish to fine-tune a model via LoRA, provide the flag `--use_lora 1`, in addition to the locally saved checkpoint path.
 
@@ -98,7 +98,7 @@ You may also initialize weights from a saved checkpoint by adding `--saved_check
 Fine-tuning follows a leave-one-subject-out (LOSO) protocol. The helper script `finetune_runner.sh` trains a separate model for every subject in the ROAM-EMG dataset. Open `finetune_runner.sh` and set `saved_checkpoint_pth` to be your pre-trained checkpoint path, and start LOSO fine-tuning via:
 
 ```bash
-$ source finetune_runner.sh
+source finetune_runner.sh
 ```
 
 ## :bar_chart: Evaluation
@@ -111,7 +111,7 @@ During evaluation, we run the model exactly as how it would run online: windows 
 
 ### Run the evaluation
 ```bash
-$ python3 event_classification.py \
+python3 event_classification.py \
   --eval_task predict_action \
   --files_or_dirs ../data/ROAM_EMG \
   --allow_relax 0 \
