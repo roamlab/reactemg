@@ -12,3 +12,6 @@ dependencies:
   - tqdm
   - ca-certificates
   - openssl
+  - pip
+  - pip:
+      - wandb
