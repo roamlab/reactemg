@@ -22,7 +22,7 @@ Columbia University
 ReactEMG is a zero-shot, low-latency EMG framework that segments forearm signals in real time to predict hand gestures at every timestep, delivering calibration-free, high-accuracy intent detection ideal for controlling prosthetic and robotic devices.
 
 ## :package: Installation
-Clone the repo with the `--recurse-submodules` flag and install our conda (mamba) environment on an Ubuntu machine with a NVIDIA GPU. We use Ubuntu 24.04 LTS and Python 3.11. 
+Clone the repo with `--recurse-submodules` and install our conda (mamba) environment on an Ubuntu machine with a NVIDIA GPU. We use Ubuntu 24.04 LTS and Python 3.11. 
 
 ```bash
 mamba env create -f environment.yml
