@@ -87,7 +87,7 @@ python3 main.py \
   --exp_name <RUN_ID>
 ```
 
-If this is your first time using W&B on the host machine, you will be prompted to provide credentials:
+If this is your first time using W&B on your machine, you will be prompted to provide credentials:
 
 ```text
 wandb: (1) Create a W&B account
