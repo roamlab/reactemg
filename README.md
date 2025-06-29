@@ -36,7 +36,7 @@ After installing PyTorch, install minLoRA via:
 cd minLoRA && pip install -e .
 ```
 
-minLorRA was built for editable install with `setup.py develop`, which is deprecated. Considering enabling `--use-pep517` and use `setuptools ≥ 64` when working with `pip ≥ 25.3`.
+minLorRA was built for editable install with `setup.py develop`, which is deprecated. Consider enabling `--use-pep517` and use `setuptools ≥ 64` when working with `pip ≥ 25.3`.
 
 ## :floppy_disk: Datasets
 
