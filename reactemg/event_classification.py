@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 import json
 import random as rdm
 import numpy as np
@@ -25,6 +26,7 @@ from nn_models import (
 )
 from minlora import add_lora, merge_lora, LoRAParametrization
 from torch.nn.utils import parametrize
+from collections import defaultdict
 
 
 ###############################################################################
@@ -1390,6 +1392,11 @@ def main(
     event_accuracies_per_file = []
     raw_accuracies_per_file = []
 
+    # subject-level statistics
+    if epn_eval == 1:
+        subj_event_dict = defaultdict(list)
+        subj_raw_dict = defaultdict(list)
+
     # Will store per-file results
     results_across_files = []
 
@@ -1472,6 +1479,13 @@ def main(
         event_accuracies_per_file.append(event_acc)
         raw_accuracies_per_file.append(raw_acc)
 
+        # Extract subject id from the file path"../data/EMG-EPN-612/testingJSON_user<id>/<file>.npy"
+        if epn_eval == 1:
+            m = re.search(r"testingJSON_user(\d+)", csv_path)
+            subj_id = m.group(1) if m else "unknown"
+            subj_event_dict[subj_id].append(event_acc)
+            subj_raw_dict[subj_id].append(raw_acc)
+
         total_correct_events += event_acc * event_counts
         total_events += event_counts
         sum_raw_accuracies += raw_acc
@@ -1514,6 +1528,17 @@ def main(
         np.std(raw_accuracies_per_file) if raw_accuracies_per_file else 0.0
     )
 
+    # Collapse multiple files of the same subject into one mean
+    if epn_eval == 1 and subj_event_dict:
+        subj_event_means = [np.mean(v) for v in subj_event_dict.values()]
+        subj_raw_means = [np.mean(v) for v in subj_raw_dict.values()]
+        mean_event_subj = np.mean(subj_event_means)
+        std_event_subj = np.std(subj_event_means)
+        mean_raw_subj = np.mean(subj_raw_means)
+        std_raw_subj = np.std(subj_raw_means)
+    else:
+        mean_event_subj = std_event_subj = mean_raw_subj = std_raw_subj = None
+
     # Build a counter over all transition reasons
     reason_counter = Counter(all_reasons)
 
@@ -1547,6 +1572,17 @@ def main(
             f"Raw Accuracy (average) (avg ± std): "
             f"{avg_raw_accuracy:.4f} ± {std_raw_accuracy:.4f}\n"
         )
+
+        if epn_eval == 1 and mean_event_subj is not None:
+            f.write(f"\n--- Per‑Subject Statistics (N={len(subj_event_means)}) ---\n")
+            f.write(
+                f"Transition Accuracy (avg ± std): "
+                f"{mean_event_subj:.4f} ± {std_event_subj:.4f}\n"
+            )
+            f.write(
+                f"Raw Accuracy (avg ± std): {mean_raw_subj:.4f} ± {std_raw_subj:.4f}\n"
+            )
+
         f.write(f"Total Transition (Event): {total_events}\n\n")
 
         f.write("=== Distribution of Transition Reasons ===\n")
@@ -1555,6 +1591,17 @@ def main(
         f.write("\nEnd of summary.\n")
 
     print(f"Final summary saved to: {summary_path}")
+
+    if epn_eval == 1 and mean_event_subj is not None:
+        print("\n=== Per‑Subject Summary ===")
+        print(
+            f"  Transition Acc: {mean_event_subj:.4f} ± {std_event_subj:.4f} "
+            f"(N={len(subj_event_means)} subjects)"
+        )
+        print(
+            f"  Raw Acc:        {mean_raw_subj:.4f} ± {std_raw_subj:.4f} "
+            f"(N={len(subj_raw_means)} subjects)"
+        )
 
     # Write JSON with per-file details if verbose=1
     if verbose == 1:

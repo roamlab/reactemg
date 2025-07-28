@@ -12,7 +12,7 @@ for patient_id in "${patient_ids[@]}"; do
     exp_name="LOSO_${patient_id}"
     
     # Construct the full command
-    command="python3 main.py --offset 30 --num_classes 3 --task_selection 0 1 2 --dataset_selection roam_only --window_size 600 --val_patient_ids ${patient_id} --exp_name ${exp_name} --epn_subset_percentage 1.0 --epochs 5 --model_choice any2any --inner_window_size 600 --saved_checkpoint_pth ${saved_checkpoint_pth}"
+    command="python3 main.py --offset 30 --num_classes 3 --task_selection 0 1 2 --use_input_layernorm --share_pe --dataset_selection roam_only --window_size 600 --val_patient_ids ${patient_id} --exp_name ${exp_name} --epn_subset_percentage 1.0 --epochs 5 --model_choice any2any --inner_window_size 600 --saved_checkpoint_pth ${saved_checkpoint_pth}"
 
     echo "Running command: $command"
     

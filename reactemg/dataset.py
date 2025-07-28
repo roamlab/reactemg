@@ -95,10 +95,8 @@ class ANN_Dataset(Dataset):
             # 2) Construct "padding" of length window_size from first 100 timesteps.
             # -------------------------------------------------------
             if data_array.shape[0] < 100:
-                raise ValueError(
-                    f"The file {path} has fewer than 100 timesteps. "
-                    f"Cannot create valid padding from first 100 timesteps."
-                )
+                print(f"Skipping {path}: only {data_array.shape[0]} timesteps (<100).")
+                continue
 
             pad_section_emg = data_array[:100]
             pad_section_gt = action_sequence[:100]
