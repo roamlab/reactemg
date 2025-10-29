@@ -8,12 +8,14 @@ from nn_models import (
     EDTCN_Model,
     LSTM_Model,
     ANN_Model,
+    TraHGR_Model,
 )
 from dataset import (
     Any2Any_Dataset,
     EDTCN_Dataset,
     LSTM_Dataset,
     ANN_Dataset,
+    TraHGR_Dataset,
 )
 
 
@@ -392,6 +394,8 @@ def initialize_dataset(
             scale_factor = effective_mav_length / args.window_size
             args.transition_buffer = max(1, int(args.transition_buffer * scale_factor))
 
+        labeled_csv_paths_train = labeled_csv_paths_train[:10]
+        labeled_csv_paths_val = labeled_csv_paths_val[:10]
         dataset_train = Any2Any_Dataset(
             labeled_csv_paths_train,
             unlabeled_csv_paths_train,
@@ -498,6 +502,19 @@ def initialize_dataset(
             precomputed_mean=dataset_train.mean_,
             precomputed_std=dataset_train.std_,
         )
+    elif args.model_choice == "trahgr":
+        dataset_train = TraHGR_Dataset(
+            window_size=args.window_size,
+            offset=args.offset,
+            file_paths=labeled_csv_paths_train,
+            num_classes=args.num_classes,
+        )
+        dataset_val = TraHGR_Dataset(
+            window_size=args.window_size,
+            offset=args.offset,
+            file_paths=labeled_csv_paths_val,
+            num_classes=args.num_classes,
+        )
     else:
         raise ValueError(f"Unknown model_choice: {args.model_choice}")
 
@@ -542,6 +559,18 @@ def initialize_model(args):
         )
     elif args.model_choice == "ann":
         model = ANN_Model(num_classes=args.num_classes)
+    elif args.model_choice == "trahgr":
+        model = TraHGR_Model(
+            num_classes=args.num_classes,
+            embed_dim=args.embedding_dim,
+            num_heads=args.nhead,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            window_len=args.window_size,
+            num_sensors=8,
+            num_filter_orders=3
+
+        )
     else:
         raise ValueError(f"Unknown model_choice: {args.model_choice}")
 

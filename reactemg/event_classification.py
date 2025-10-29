@@ -17,12 +17,14 @@ from dataset import (
     EDTCN_Dataset,
     LSTM_Dataset,
     ANN_Dataset,
+    TraHGR_Dataset
 )
 from nn_models import (
     Any2Any_Model,
     EDTCN_Model,
     LSTM_Model,
     ANN_Model,
+    TraHGR_Model
 )
 from minlora import add_lora, merge_lora, LoRAParametrization
 from torch.nn.utils import parametrize
@@ -808,6 +810,14 @@ def initialize_dataset(
             precomputed_mean=args_dict["precomputed_mean"],
             precomputed_std=args_dict["precomputed_std"],
         )
+    elif model_choice == "trahgr":
+        dataset = TraHGR_Dataset(
+            window_size=args_dict["window_size"],
+            offset=stride,
+            file_paths=[csv_path],
+            num_classes=args_dict["num_classes"],
+            butter_cutoff_hz=args_dict.get("trahgr_butter_cutoff_hz", 90.0),
+        )
     else:
         raise ValueError(f"Unknown model_choice: {model_choice}")
 
@@ -864,6 +874,22 @@ def initialize_model(args_dict, checkpoint, model_choice, device):
         )
     elif model_choice == "ann":
         model = ANN_Model(num_classes=args_dict["num_classes"])
+    elif model_choice == "trahgr":
+        # Defaults = TraHGR-Huge from the paper (L=1, D=144, MLP=720, h=8)
+        model = TraHGR_Model(
+            num_classes=args_dict["num_classes"],
+            embed_dim=args_dict["embedding_dim"],
+            num_heads=args_dict["nhead"],
+            num_layers=args_dict["num_layers"],
+            dropout=args_dict["dropout"],
+            window_len=args_dict["window_size"],
+            num_sensors=8,
+            num_filter_orders=3
+
+        )
+        print("hi")
+
+        
     else:
         raise ValueError(f"Unknown model_choice: {model_choice}")
 
@@ -1030,6 +1056,83 @@ def process_and_evaluate(
                 pred_aggregated[fill_t] = last_pred
 
         # trim empty filler at the beginning
+        gt_aggregated = gt_aggregated[window_size:]
+        pred_aggregated = pred_aggregated[window_size:]
+
+    elif model_choice == "trahgr":
+        # TraHGR: treat as single-label window classifier (use fused head)
+        # dataset_eval.__getitem__ returns: (temporal_patches [S, W*C], featural_patches [Nf, S*S*C], y, raw_gt_seq)
+        dataloader_eval = DataLoader(
+            dataset_eval,
+            batch_size=eval_batch_size,
+            shuffle=False,
+            pin_memory=True,
+            num_workers=1,
+        )
+
+        model.eval()
+        window_size = args_dict["window_size"]
+        num_windows = len(dataset_eval)
+
+        final_length = (num_windows - 1) * stride + window_size
+        pred_aggregated = np.full(final_length, -1, dtype=int)
+        gt_aggregated = np.full(final_length, -1, dtype=int)
+
+        last_filled_t = -1
+        last_pred = -1
+
+        with torch.no_grad():
+            for global_i, batch_data in enumerate(dataloader_eval):
+                temporal_patches, featural_patches, y_batch, raw_gt_batch = batch_data
+                # Forward: get fused logits (y_fused)
+                y_fused, y_tnet, y_fnet = model(
+                    temporal_patches.to(device).float(),
+                    featural_patches.to(device).float()
+                )
+                preds = torch.argmax(y_fused, dim=-1).cpu().numpy()  # [B]
+
+                for b in range(temporal_patches.size(0)):
+                    i_window = global_i * eval_batch_size + b
+                    if i_window >= num_windows:
+                        break
+
+                    end_t = i_window * stride + (window_size - 1)
+                    if end_t >= final_length:
+                        continue
+
+                    current_pred = int(preds[b])
+
+                    # Fill predictions from the last assigned index up to end_t
+                    for fill_t in range(last_filled_t + 1, end_t + 1):
+                        if 0 <= fill_t < final_length:
+                            pred_aggregated[fill_t] = last_pred if last_pred != -1 else current_pred
+
+                    # Update rolling state
+                    last_pred = current_pred
+                    last_filled_t = end_t
+
+                    # Fill GT for the newly added part using the last `stride` timesteps of the window
+                    if stride > window_size:
+                        relevant_gt = raw_gt_batch[b].numpy()
+                    else:
+                        start_idx = max(0, window_size - stride)
+                        relevant_gt = raw_gt_batch[b, start_idx:].numpy()
+
+                    stride_len = len(relevant_gt)
+                    gt_fill_start = end_t - (stride_len - 1)
+                    gt_fill_start = max(0, gt_fill_start)
+                    for k in range(stride_len):
+                        fill_t = gt_fill_start + k
+                        if fill_t >= final_length:
+                            break
+                        gt_aggregated[fill_t] = int(relevant_gt[k])
+
+        # Carry forward last prediction to the end if needed
+        if last_pred != -1:
+            for fill_t in range(last_filled_t + 1, final_length):
+                pred_aggregated[fill_t] = last_pred
+
+        # Trim the initial left padding region
         gt_aggregated = gt_aggregated[window_size:]
         pred_aggregated = pred_aggregated[window_size:]
 

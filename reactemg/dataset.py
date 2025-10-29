@@ -6,6 +6,10 @@ import scipy.signal
 from torch.utils.data import Dataset
 from scipy.signal import medfilt
 from tqdm import tqdm
+import math
+from typing import List, Optional, Dict, Tuple
+from torch import nn
+import torch.nn.functional as F
 
 
 ############################################################
@@ -221,6 +225,162 @@ class ANN_Dataset(Dataset):
             features_out.extend([rms_val, var_val, mav_val, ssc_val, zc_val, wl_val])
 
         return np.array(features_out, dtype=np.float32)
+
+
+
+############################################################
+########################## TraHGR ##########################
+############################################################
+def scale_to_unit(x):
+    return np.clip(x / 128.0, -1.0, 1.0)
+
+class TraHGR_Dataset(Dataset):
+    def __init__(
+        self,
+        window_size: int,
+        offset: int,
+        file_paths: List[str],
+        num_classes: int,
+        butter_cutoff_hz: float = 90.0,
+    ):
+        super().__init__()
+        self.window_size = int(window_size)
+        self.offset = int(offset)
+        self.file_paths = file_paths
+        self.num_classes = int(num_classes)
+        self.butter_cutoff_hz = float(butter_cutoff_hz)
+
+        self.S = 8
+        self.fs = 200
+        self.C = 3
+        self.W = self.window_size
+
+        if self.W % self.S != 0:
+            raise ValueError(f"Window size ({self.W}) must be divisible by number of sensors ({self.S})")
+
+        self.all_temporal = []
+        self.all_featural = []
+        self.all_labels = []
+        self.all_raw_gt = []
+
+        # Loop over each file
+        for path in tqdm(self.file_paths):
+            data_array, action_sequence = self._load_file(path)
+            if data_array.shape[0] < 100:
+                continue
+
+            # Create padding from first 100 timesteps
+            pad_len = self.window_size
+            seed = data_array[:100]
+            seed_gt = action_sequence[:100]
+            reps = int(np.ceil(pad_len / 100))
+            pad_sig = np.tile(seed, (reps, 1))[:pad_len]
+            pad_gt = np.tile(seed_gt, reps)[:pad_len]
+
+            # Concatenate padding with actual data
+            x = np.concatenate([pad_sig, data_array], axis=0)
+            y = np.concatenate([pad_gt, action_sequence], axis=0)
+            N = x.shape[0]
+
+            # Sliding windows
+            for start_idx in range(0, N - self.window_size + 1, self.offset):
+                end_idx = start_idx + self.window_size
+                window_emg = x[start_idx:end_idx, :]
+                window_gt = y[start_idx:end_idx]
+
+                label_for_window = int(window_gt[-1])
+
+                # Apply TraHGR preprocessing
+                proc = self._butterworth_filter(window_emg)
+                temporal, featural = self._create_patches(proc)
+
+                self.all_temporal.append(temporal)
+                self.all_featural.append(featural)
+                self.all_labels.append(label_for_window)
+                self.all_raw_gt.append(window_gt.copy())
+
+
+        if len(self.all_labels) == 0:
+            raise RuntimeError("No samples constructed")
+
+        self.all_temporal = np.asarray(self.all_temporal, dtype=np.float32)
+        self.all_featural = np.asarray(self.all_featural, dtype=np.float32)
+        self.all_labels = np.asarray(self.all_labels, dtype=np.int64)
+        self.all_raw_gt = np.asarray(self.all_raw_gt, dtype=np.int64)
+
+    def _load_file(self, path: str) -> Tuple[np.ndarray, np.ndarray]:
+        if path.lower().endswith('.csv'):
+            df = pd.read_csv(path)
+            if 'gt' not in df.columns:
+                raise Exception('gt column not found')
+            action_sequence = df['gt'].to_numpy()
+            try:
+                df_emg = df[[
+                    'emg_0','emg_1','emg_2','emg_3','emg_4','emg_5','emg_6','emg_7'
+                ]]
+            except KeyError:
+                df_emg = df[[
+                    'emg0','emg1','emg2','emg3','emg4','emg5','emg6','emg7'
+                ]]
+            data_array = df_emg.to_numpy().astype(np.float32)
+        elif path.lower().endswith('.npy'):
+            loaded = np.load(path).astype(np.float32)
+            action_sequence = loaded[:, 0]
+            data_array = loaded[:, 1:]
+        else:
+            raise ValueError("File extension not recognized. Must be .csv or .npy")
+        return data_array, action_sequence
+
+    def _butterworth_filter(self, window_emg: np.ndarray) -> np.ndarray:
+        """Apply Butterworth filtering with orders 1,3,5"""
+        from scipy.signal import butter, filtfilt
+
+        W, S = window_emg.shape
+        assert S == self.S, f"Expected S={self.S}, got {S}"
+
+        proc = np.zeros((self.S, self.W, self.C), dtype=np.float32)
+        orders = [1, 3, 5]
+
+        for s in range(self.S):
+            # Scale to [-1, 1] range
+            sig_raw = window_emg[:, s].astype(np.float32)
+            sig = scale_to_unit(sig_raw)
+
+            # Apply filtering at each order
+            for ci, order in enumerate(orders):
+                b, a = butter(order, self.butter_cutoff_hz, btype='low', fs=self.fs)
+                filt = filtfilt(b, a, sig).astype(np.float32)
+                proc[s, :, ci] = filt
+
+        return proc
+
+    def _create_patches(self, processed: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Create temporal and featural patches"""
+        S, W, C = processed.shape
+        assert S == self.S and W == self.W and C == self.C
+
+        # Temporal patches: one token per sensor
+        temporal = processed.reshape(S, W * C)
+
+        # Featural patches: non-overlapping blocks
+        Nf = W // S
+        featural = np.zeros((Nf, S * S * C), dtype=np.float32)
+        for i in range(Nf):
+            t0 = i * S
+            t1 = t0 + S
+            block = processed[:, t0:t1, :]
+            featural[i] = block.reshape(-1)
+        return temporal.astype(np.float32), featural.astype(np.float32)
+
+    def __len__(self):
+        return len(self.all_labels)
+
+    def __getitem__(self, idx: int):
+        temporal = torch.from_numpy(self.all_temporal[idx])
+        featural = torch.from_numpy(self.all_featural[idx])
+        y = torch.tensor(self.all_labels[idx], dtype=torch.long)
+        raw_gt = torch.from_numpy(self.all_raw_gt[idx])
+        return temporal, featural, y, raw_gt
 
 
 ##########################################################

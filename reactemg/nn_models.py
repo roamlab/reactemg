@@ -1,16 +1,17 @@
+import os, socket, datetime, math
+from typing import Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
+import wandb
 
 
 ##############################
 ############# ANN ############
 ##############################
 class ANN_Model(nn.Module):
-    """
-    A 4-layer MLP with 1000 neurons in each layer, dropout=0.3, batchnorm, ReLU
-    from the paper's best configuration. Input=48 features, output=args.num_classes.
-    """
 
     def __init__(self, num_classes):
         super(ANN_Model, self).__init__()
@@ -40,10 +41,6 @@ class ANN_Model(nn.Module):
         self.relu = nn.ReLU()
 
     def forward(self, x):
-        """
-        x: shape [batch_size, 48] (features from dataset)
-        returns: shape [batch_size, num_classes]
-        """
 
         x = self.fc1(x)
         x = self.bn1(x)
@@ -74,12 +71,6 @@ class ANN_Model(nn.Module):
 ################################
 class LSTM_Model(nn.Module):
     def __init__(self, input_size=8, fc_size=400, hidden_size=256, num_classes=6):
-        """
-        input_size : # of input channels per timestep (8 if 8-channel EMG).
-        fc_size    : # of neurons in first fully-connected projection (paper used 400).
-        hidden_size: # of LSTM hidden units (paper used 256).
-        num_classes: number of gesture classes (3,6,...).
-        """
         super().__init__()
         self.fc1 = nn.Linear(input_size, fc_size)
         self.lstm = nn.LSTM(
@@ -88,47 +79,153 @@ class LSTM_Model(nn.Module):
         self.fc2 = nn.Linear(hidden_size, num_classes)
 
     def forward(self, x):
-        """
-        x shape: (batch_size, seq_len, input_size=8)
-        Returns logits of shape: (batch_size, seq_len, num_classes)
-        """
         batch_size, seq_len, _ = x.shape
-        x = torch.tanh(self.fc1(x))  # => (batch_size, seq_len, fc_size)
-        x, (h_n, c_n) = self.lstm(x)  # => (batch_size, seq_len, hidden_size)
-        logits = self.fc2(x)  # => (batch_size, seq_len, num_classes)
+        x = torch.tanh(self.fc1(x))
+        x, (h_n, c_n) = self.lstm(x)
+        logits = self.fc2(x)
         return logits
 
+###################################
+############# TraHGR ##############
+###################################
+class TraHGR_Model(nn.Module):
+    def __init__(
+        self,
+        num_classes: int,
+        num_sensors: int,             # e.g., 8
+        window_len: int,              # e.g., args.window_size
+        num_filter_orders: int,       # 3 (orders 1,3,5)
+        embed_dim: int = 128,
+        num_layers: int = 4,
+        num_heads: int = 8,
+        mlp_ratio: int = 4,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.num_classes = num_classes
+        self.num_sensors = num_sensors
+        self.window_len = window_len
+        self.num_filter_orders = num_filter_orders
+        self.embed_dim = embed_dim
+        self.num_layers = num_layers
+        self.num_heads = num_heads
+
+        temporal_flat_dim = window_len * num_filter_orders
+        temporal_num_patches = num_sensors
+
+        featural_flat_dim = num_sensors * num_sensors * num_filter_orders
+        featural_num_patches = window_len // num_sensors
+        assert window_len % num_sensors == 0, "window_len must be divisible by num_sensors"
+        self.temporal_proj = nn.Linear(temporal_flat_dim, embed_dim)
+        self.featural_proj = nn.Linear(featural_flat_dim, embed_dim)
+
+        self.temporal_cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
+        self.featural_cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
+        self.temporal_pos_embed = nn.Parameter(torch.randn(1, temporal_num_patches + 1, embed_dim))
+        self.featural_pos_embed = nn.Parameter(torch.randn(1, featural_num_patches + 1, embed_dim))
+
+        t_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim, nhead=num_heads, dim_feedforward=mlp_ratio * embed_dim,
+            dropout=dropout, activation="gelu", batch_first=True, norm_first=True
+        )
+        f_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim, nhead=num_heads, dim_feedforward=mlp_ratio * embed_dim,
+            dropout=dropout, activation="gelu", batch_first=True, norm_first=True
+        )
+        self.temporal_encoder = nn.TransformerEncoder(t_layer, num_layers=num_layers)
+        self.featural_encoder = nn.TransformerEncoder(f_layer, num_layers=num_layers)
+
+        self.norm_t_head = nn.LayerNorm(embed_dim)
+        self.norm_f_head = nn.LayerNorm(embed_dim)
+        self.norm_fuse_head = nn.LayerNorm(embed_dim)
+
+        self.temporal_head = nn.Linear(embed_dim, num_classes)
+        self.featural_head = nn.Linear(embed_dim, num_classes)
+        self.fused_head = nn.Linear(embed_dim, num_classes)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None: nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+        nn.init.normal_(self.temporal_cls_token, std=0.02)
+        nn.init.normal_(self.featural_cls_token, std=0.02)
+        nn.init.normal_(self.temporal_pos_embed, std=0.02)
+        nn.init.normal_(self.featural_pos_embed, std=0.02)
+
+    @torch.no_grad()
+    def _assert_shapes(self, temporal_patches: torch.Tensor, featural_patches: torch.Tensor):
+        # temporal: [B, num_sensors, window_len*num_filter_orders]
+        # featural: [B, window_len//num_sensors, num_sensors*num_sensors*num_filter_orders]
+        B1, s, tdim = temporal_patches.shape
+        B2, nf, fdim = featural_patches.shape
+        assert B1 == B2, "Batch sizes mismatch."
+        assert s == self.num_sensors, f"Expected num_sensors={self.num_sensors}, got {s}"
+        assert tdim == self.window_len * self.num_filter_orders, (
+            f"Temporal dim must be window_len*num_filter_orders={self.window_len*self.num_filter_orders}, got {tdim}"
+        )
+        expected_nf = self.window_len // self.num_sensors
+        assert nf == expected_nf, f"Featural patches must be window_len//num_sensors={expected_nf}, got {nf}"
+        expected_fdim = self.num_sensors * self.num_sensors * self.num_filter_orders
+        assert fdim == expected_fdim, f"Featural dim must be {expected_fdim}, got {fdim}"
+
+    def forward(self, temporal_patches: torch.Tensor, featural_patches: torch.Tensor):
+        """
+        Args:
+          temporal_patches: [B, num_sensors, window_len*num_filter_orders]
+          featural_patches: [B, window_len//num_sensors, num_sensors*num_sensors*num_filter_orders]
+        Returns:
+          y_fused, y_tnet, y_fnet  (each [B, num_classes])
+        """
+        self._assert_shapes(temporal_patches, featural_patches)
+        B = temporal_patches.size(0)
+
+        t_tokens = self.temporal_proj(temporal_patches)
+        f_tokens = self.featural_proj(featural_patches)
+
+        t_cls = self.temporal_cls_token.expand(B, -1, -1)
+        f_cls = self.featural_cls_token.expand(B, -1, -1)
+        t_seq = torch.cat([t_cls, t_tokens], dim=1)
+        f_seq = torch.cat([f_cls, f_tokens], dim=1)
+
+        t_seq = t_seq + self.temporal_pos_embed
+        f_seq = f_seq + self.featural_pos_embed
+
+        t_out = self.temporal_encoder(t_seq)
+        f_out = self.featural_encoder(f_seq)
+
+        t_cls_out = t_out[:, 0, :]
+        f_cls_out = f_out[:, 0, :]
+        y_tnet = self.temporal_head(self.norm_t_head(t_cls_out))
+        y_fnet = self.featural_head(self.norm_f_head(f_cls_out))
+        fused = t_cls_out + f_cls_out
+        y_fused = self.fused_head(self.norm_fuse_head(fused))
+
+        return y_fused, y_tnet, y_fnet
 
 ##################################
 ############# ED_TCN #############
 ##################################
 class EDTCN_Model(nn.Module):
-    """
-    2-layer encoder-decoder TCN for sequence labeling:
-      - Each 'encoder' layer:
-         1D Conv -> ReLU -> MaxPool (kernel_size=2, stride=2)
-      - Each 'decoder' layer:
-         Upsample (factor=2) -> 1D Conv -> ReLU
-      - Final layer:
-         Time-distributed linear -> outputs (B, T, num_classes)
-    """
 
     def __init__(
         self, num_channels=8, num_classes=10, enc_filters=(128, 288), kernel_size=25
     ):
         super().__init__()
 
-        # -------------- Encoder --------------
-        # First encoder layer: from (num_channels) to enc_filters[0]
         self.encoder_conv1 = nn.Conv1d(
             in_channels=num_channels,
             out_channels=enc_filters[0],
             kernel_size=kernel_size,
             padding=kernel_size // 2,
-        )  # 'same' padding
+        )
         self.encoder_pool1 = nn.MaxPool1d(kernel_size=2, stride=2)
 
-        # Second encoder layer: from enc_filters[0] to enc_filters[1]
         self.encoder_conv2 = nn.Conv1d(
             in_channels=enc_filters[0],
             out_channels=enc_filters[1],
@@ -136,10 +233,6 @@ class EDTCN_Model(nn.Module):
             padding=kernel_size // 2,
         )
         self.encoder_pool2 = nn.MaxPool1d(kernel_size=2, stride=2)
-
-        # -------------- Decoder --------------
-        # Mirror the encoder structure but in reverse
-        # Do upsampling + 1D conv -> ReLU
         self.decoder_upsample2 = nn.Upsample(scale_factor=2, mode="nearest")
         self.decoder_conv2 = nn.Conv1d(
             in_channels=enc_filters[1],
@@ -156,48 +249,31 @@ class EDTCN_Model(nn.Module):
             padding=kernel_size // 2,
         )
 
-        # Final time-distributed output layer
         self.final_conv = nn.Conv1d(
             in_channels=enc_filters[0], out_channels=num_classes, kernel_size=1
-        )  # 1x1 conv over time => (B, num_classes, T)
+        )
 
     def forward(self, x):
-        """
-        x: shape (B, T, num_channels)
-        returns: shape (B, T, num_classes)
-        """
-        # (B, T, C_in) -> rearrange to (B, C_in, T) for Conv1d
-        x = x.transpose(1, 2)  # shape = (B, C_in=8, T=19)
+        x = x.transpose(1, 2)
 
-        # --------- Encoder ---------
-        # Layer 1
-        x = self.encoder_conv1(x)  # (B, f1, T)
+        x = self.encoder_conv1(x)
         x = F.relu(x)
-        x = self.encoder_pool1(x)  # (B, f1, T/2)
+        x = self.encoder_pool1(x)
 
-        # Layer 2
-        x = self.encoder_conv2(x)  # (B, f2, T/2)
+        x = self.encoder_conv2(x)
         x = F.relu(x)
-        x = self.encoder_pool2(x)  # (B, f2, T/4)  [approx if T isn't multiple of 4]
+        x = self.encoder_pool2(x)
 
-        # --------- Decoder ---------
-        # Mirror Layer 2
-        x = self.decoder_upsample2(x)  # (B, f2, T/2)
-        x = self.decoder_conv2(x)  # (B, f2, T/2)
+        x = self.decoder_upsample2(x)
+        x = self.decoder_conv2(x)
         x = F.relu(x)
 
-        # Mirror Layer 1
-        x = self.decoder_upsample1(x)  # (B, f2, T)
-        x = self.decoder_conv1(x)  # (B, f1, T)
+        x = self.decoder_upsample1(x)
+        x = self.decoder_conv1(x)
         x = F.relu(x)
 
-        # Final conv => (B, num_classes, T)
         x = self.final_conv(x)
-
-        # Permute back => (B, T, num_classes)
-        x = x.transpose(
-            1, 2
-        )  # for a typical cross-entropy with dimension (B, #class, T), adapt below
+        x = x.transpose(1, 2)
         return x
 
 

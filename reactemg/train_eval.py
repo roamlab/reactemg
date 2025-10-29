@@ -1,12 +1,10 @@
+import os, socket, datetime, math, random
 import torch
-import wandb
-import datetime
-import os
 import torch.nn as nn
 import torch.nn.functional as F
-import socket
-import random
+from torch import nn
 from torch.utils.data import DataLoader, Sampler
+import wandb
 from minlora import get_lora_state_dict, name_is_lora
 
 
@@ -56,6 +54,17 @@ def initialize_training(
         )
     elif model_choice == "ann":
         train_ann(
+            model,
+            dataset_train,
+            dataset_val,
+            optimizer,
+            scheduler,
+            epochs,
+            device,
+            args_dict,
+        )
+    elif model_choice == "trahgr":
+        train_trahgr(
             model,
             dataset_train,
             dataset_val,
@@ -504,7 +513,7 @@ def train_any2any(
         exp_name = f"unnamed_{timestamp}_{machine_name}"
     wandb.init(
         project=os.environ.get("WANDB_PROJECT", "default_project"),
-        entity=os.environ.get("WANDB_ENTITY", None),
+        entity="yolandaz",
         name=exp_name,
         config=args_dict,
     )
@@ -594,7 +603,6 @@ def train_any2any(
             num_workers=4,
         )
 
-        # ---- 1) Training ----
         train_stats = train_one_epoch(
             model=model,
             dataloader_train=dataloader_train,
@@ -622,7 +630,6 @@ def train_any2any(
                 print(f"{name}: {change}")
             print()
 
-        # ---- 2) Validation ----
         val_stats = validate_one_epoch(
             model=model,
             dataloader_val=dataloader_val,
@@ -709,9 +716,7 @@ def train_edtcn(
 
     model.to(device)
 
-    # -------------- Training Loop --------------
     for epoch in range(1, epochs + 1):
-        # ----- Train -----
         model.train()
         running_train_loss = 0.0
         grad_norms = []
@@ -740,7 +745,6 @@ def train_edtcn(
         avg_grad_norm = (sum(grad_norms) / len(grad_norms)) if grad_norms else 0.0
         max_grad_norm = (max(grad_norms)) if grad_norms else 0.0
 
-        # ----- Validation -----
         model.eval()
         running_val_loss = 0.0
         with torch.no_grad():
@@ -778,7 +782,6 @@ def train_edtcn(
             f"Avg Grad Norm: {avg_grad_norm:.4f}"
         )
 
-        # ----- Save checkpoint -----
         current_checkpoint_path = os.path.join(checkpoint_dir, f"epoch_{epoch}.pth")
         model_info = {
             "model_state_dict": model.state_dict(),
@@ -1021,9 +1024,7 @@ def train_ann(
             for param_group in optimizer.param_groups:
                 current_lr = param_group["lr"]
 
-        # ----------------------------------------------------------------
         # Validation loop
-        # ----------------------------------------------------------------
         model.eval()
         val_loss = 0.0
         total_val = 0
@@ -1072,3 +1073,141 @@ def train_ann(
         torch.save(save_dict, current_checkpoint_path)
 
     wandb.finish()
+
+
+def train_trahgr(
+    model, dataset_train, dataset_val, optimizer, scheduler, epochs, device, args_dict
+):
+    machine_name = socket.gethostname()
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    args_dict = dict(args_dict)
+    args_dict['machine_name'] = machine_name
+    if args_dict.get('exp_name') is not None:
+        exp_name = f"{args_dict['exp_name']}_{timestamp}_{machine_name}"
+    else:
+        exp_name = f"unnamed_{timestamp}_{machine_name}"
+
+    wandb.init(
+        project=os.environ.get("WANDB_PROJECT", "default_project"),
+        entity=os.environ.get("WANDB_ENTITY", None),
+        name=exp_name,
+        config=args_dict
+    )
+
+    checkpoint_dir = f"model_checkpoints/{exp_name}"
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    batch_size = args_dict['batch_size']
+    num_workers = args_dict.get('num_workers', 4)
+    pin_memory = args_dict.get('pin_memory', torch.cuda.is_available())
+    drop_last = args_dict.get('drop_last', False)
+
+    train_loader = DataLoader(
+        dataset_train,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=drop_last,
+    )
+    val_loader = DataLoader(
+        dataset_val,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=False,
+    )
+
+    model = model.to(device)
+    criterion = nn.CrossEntropyLoss()
+    for epoch in range(1, epochs + 1):
+        model.train()
+        train_loss_sum = 0.0
+        train_count = 0
+
+        grad_norm_sum = 0.0
+        grad_norm_max_epoch = 0.0
+        grad_steps = 0
+
+        for temporal_patches, featural_patches, y, _ in train_loader:
+            temporal_patches = temporal_patches.to(device).float()
+            featural_patches = featural_patches.to(device).float()
+            y = y.to(device).long()
+
+            optimizer.zero_grad(set_to_none=True)
+
+            y_fused, y_tnet, y_fnet = model(temporal_patches, featural_patches)
+            loss = criterion(y_tnet, y) + criterion(y_fnet, y) + criterion(y_fused, y)
+            loss.backward()
+
+            total_sq = 0.0
+            max_g = 0.0
+            for p in model.parameters():
+                if p.grad is None:
+                    continue
+                g = p.grad.detach()
+                gn = g.norm(2).item()
+                total_sq += gn * gn
+                if gn > max_g:
+                    max_g = gn
+            step_gn = math.sqrt(total_sq) if total_sq > 0 else 0.0
+            grad_norm_sum += step_gn
+            grad_norm_max_epoch = max(grad_norm_max_epoch, max_g)
+            grad_steps += 1
+
+            optimizer.step()
+
+            bsz = y.size(0)
+            train_loss_sum += loss.item() * bsz
+            train_count += bsz
+
+        train_loss = train_loss_sum / max(1, train_count)
+        avg_grad_norm = grad_norm_sum / max(1, grad_steps)
+        model.eval()
+        val_loss_sum = 0.0
+        val_count = 0
+        with torch.no_grad():
+            for temporal_patches, featural_patches, y, _ in val_loader:
+                temporal_patches = temporal_patches.to(device).float()
+                featural_patches = featural_patches.to(device).float()
+                y = y.to(device).long()
+
+                y_fused, y_tnet, y_fnet = model(temporal_patches, featural_patches)
+                vloss = criterion(y_tnet, y) + criterion(y_fnet, y) + criterion(y_fused, y)
+
+                bsz = y.size(0)
+                val_loss_sum += vloss.item() * bsz
+                val_count += bsz
+
+        val_loss = val_loss_sum / max(1, val_count)
+
+        if scheduler is not None:
+            scheduler.step()
+
+        current_lr = optimizer.param_groups[0]['lr'] if optimizer.param_groups else None
+        wandb.log({
+            'epoch': epoch,
+            'train_loss': train_loss,
+            'val_loss': val_loss,
+            'learning_rate': current_lr,
+            'avg_grad_norm': avg_grad_norm,
+            'max_grad_norm': grad_norm_max_epoch,
+        })
+
+        # terminal print
+        print(
+            f"[Epoch {epoch:03d}] "
+            f"train_loss={train_loss:.6f}  val_loss={val_loss:.6f}  "
+            f"lr={current_lr:.6g}  avg_grad_norm={avg_grad_norm:.4f}  max_grad_norm={grad_norm_max_epoch:.4f}"
+        )
+
+        # checkpoint
+        current_checkpoint_path = os.path.join(checkpoint_dir, f"epoch_{epoch}.pth")
+        model_info = {
+            'model_state_dict': model.state_dict(),
+        }
+        save_dict = {
+            'model_info': model_info,
+            'args_dict': args_dict,
+        }
+        torch.save(save_dict, current_checkpoint_path)
