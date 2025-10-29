@@ -562,9 +562,9 @@ def initialize_model(args):
     elif args.model_choice == "trahgr":
         model = TraHGR_Model(
             num_classes=args.num_classes,
-            embed_dim=args.embedding_dim,
-            num_heads=args.nhead,
-            num_layers=args.num_layers,
+            embed_dim=144, # hardcode to follow paper implementation
+            num_heads=8, # hardcode to follow paper implementation
+            num_layers=1, # hardcode to follow paper implementation
             dropout=args.dropout,
             window_len=args.window_size,
             num_sensors=8,
