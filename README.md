@@ -3,7 +3,7 @@
 [Project Page](https://reactemg.github.io/) | [arXiv](https://arxiv.org/abs/2506.19815) | [Video](https://youtu.be/AKT8hMvVCGY)
 
 [Runsheng Wang](http://runshengwang.com/)<sup>1</sup>,
-[Xinyue Zhu](https://reactemg.github.io/)<sup>1</sup>,
+[Xinyue Zhu](https://xinyuezhu.com/)<sup>1</sup>,
 [Ava Chen](https://avachen.net/),
 [Jingxi Xu](https://jxu.ai/),
 [Lauren Winterbottom](https://reactemg.github.io/),
