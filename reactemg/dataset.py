@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import scipy.signal
 from torch.utils.data import Dataset
-from scipy.signal import medfilt
+from scipy.signal import medfilt, get_window
 from tqdm import tqdm
 import math
 from typing import List, Optional, Dict, Tuple
@@ -1667,3 +1667,165 @@ class Any2Any_Dataset(Dataset):
                     untokenized_emg,
                     action_window,
                 )
+
+
+############################################################
+########################## LDA #############################
+############################################################
+class LDA_Dataset(Dataset):
+    """
+    LDA with ANN-style padding (default):
+      • median-filter + rectification + /128 scaling
+      • prepend pad built by repeating first 100 timesteps to length == window_size
+      • slide windows (window_size, offset) on the padded sequence
+      • features per channel: RMS, WL, MAS  → 24-dim vector (8 ch × 3 feats)
+      • label = last timestep's gt in the window
+      • optional standardization (train-set stats or precomputed)
+    """
+
+    def __init__(
+        self,
+        window_size: int,
+        offset: int,
+        file_paths,
+        median_filter_size: int = 3,
+        medfilt_order: str = "before_rec",     # or "after_rec"
+        hand_choice: str = "right",            # or "left"
+        use_precomputed_stats: bool = False,
+        precomputed_mean: np.ndarray = None,
+        precomputed_std: np.ndarray = None,
+        pad_like_ann: bool = True,             # NEW
+    ):
+        super().__init__()
+        self.window_size = window_size
+        self.offset = offset
+        self.file_paths = file_paths
+        self.median_filter_size = median_filter_size
+        self.medfilt_order = medfilt_order
+        self.hand_choice = hand_choice
+        self.pad_like_ann = pad_like_ann
+
+        feats, labels, raw_gts = [], [], []
+
+        for path in tqdm(self.file_paths, desc="[LDA_Dataset] loading"):
+            # ---- load ----
+            if path.lower().endswith(".csv"):
+                df = pd.read_csv(path)
+                if "gt" not in df.columns:
+                    raise Exception(f"'gt' column not found in {path}")
+                gt = df["gt"].to_numpy()
+                try:
+                    emg_df = df[[f"emg_{i}" for i in range(8)]]
+                except KeyError:
+                    emg_df = df[[f"emg{i}" for i in range(8)]]
+                emg = emg_df.to_numpy().astype(np.float32)
+            elif path.lower().endswith(".npy"):
+                arr = np.load(path).astype(np.float32)
+                gt, emg = arr[:, 0], arr[:, 1:]
+            else:
+                raise ValueError("File extension not recognized. Must be .csv or .npy")
+
+            # ---- left-hand remap ----
+            if self.hand_choice == "left":
+                emg = emg[:, [6, 5, 4, 3, 2, 1, 0, 7]]
+
+            # ---- median filter + rectification ----
+            if self.medfilt_order == "before_rec":
+                for ch in range(8):
+                    emg[:, ch] = medfilt(emg[:, ch], kernel_size=self.median_filter_size)
+                emg = np.abs(emg)
+            elif self.medfilt_order == "after_rec":
+                emg = np.abs(emg)
+                for ch in range(8):
+                    emg[:, ch] = medfilt(emg[:, ch], kernel_size=self.median_filter_size)
+            else:
+                raise ValueError("medfilt_order must be 'before_rec' or 'after_rec'")
+
+            # ---- scale ----
+            emg = (emg / 128.0).astype(np.float32)
+            gt = gt.astype(np.int64)
+
+            # ---- ANN-style padding (optional) ----
+            if self.pad_like_ann:
+                if emg.shape[0] < 100:
+                    pass
+                    '''
+                    raise ValueError(
+                        f"The file {path} has fewer than 100 timesteps; cannot build ANN-style pad."
+                    )
+                    '''
+                pad_emg_100 = emg[:100]
+                pad_gt_100 = gt[:100]
+                times = (self.window_size // 100) + 1
+                big_pad_emg = np.tile(pad_emg_100, (times, 1))[: self.window_size]
+                big_pad_gt = np.tile(pad_gt_100, (times,))[: self.window_size]
+                emg_padded = np.concatenate([big_pad_emg, emg], axis=0)
+                gt_padded = np.concatenate([big_pad_gt, gt], axis=0)
+            else:
+                emg_padded, gt_padded = emg, gt
+
+            # ---- sliding windows on (possibly) padded arrays ----
+            N = emg_padded.shape[0]
+            for start in range(0, N - self.window_size + 1, self.offset):
+                end = start + self.window_size
+                emg_win = emg_padded[start:end, :]   # (T, 8)
+                gt_win = gt_padded[start:end]        # (T,)
+                y_last = int(gt_win[-1])
+
+                feat_vec = self._extract_features(emg_win)  # (24,)
+                feats.append(feat_vec.astype(np.float32))
+                labels.append(y_last)
+                raw_gts.append(gt_win.copy())
+
+        self.features = np.stack(feats, axis=0) if feats else np.zeros((0, 24), np.float32)
+        self.labels = np.asarray(labels, dtype=np.int64)
+        self.raw_gts = np.asarray(raw_gts, dtype=np.int64)
+
+        # ---- standardization ----
+        if use_precomputed_stats:
+            if precomputed_mean is None or precomputed_std is None:
+                raise ValueError("use_precomputed_stats=True requires precomputed_mean and precomputed_std.")
+            self.mean_ = precomputed_mean.reshape(1, -1)
+            self.std_ = precomputed_std.reshape(1, -1)
+        else:
+            self.mean_ = self.features.mean(axis=0, keepdims=True) if len(self.features) else np.zeros((1, 24), np.float32)
+            self.std_  = self.features.std(axis=0, keepdims=True)  if len(self.features) else np.ones((1, 24),  np.float32)
+
+        eps = 1e-8
+        self.std_[self.std_ < eps] = eps
+        self.features = (self.features - self.mean_) / self.std_
+
+    def __len__(self):
+        return len(self.features)
+
+    def __getitem__(self, idx):
+        x = torch.FloatTensor(self.features[idx])        # (24,)
+        y = torch.tensor(self.labels[idx], dtype=torch.long)
+        raw_gt_seq = torch.LongTensor(self.raw_gts[idx]) # (T,)
+        return x, y, raw_gt_seq
+
+    # ----- feature helpers -----
+    @staticmethod
+    def _rms(x: np.ndarray) -> float:
+        return float(np.sqrt(np.mean(x**2)))
+
+    @staticmethod
+    def _wl(x: np.ndarray) -> float:
+        return float(np.sum(np.abs(np.diff(x, axis=0))))
+
+    @staticmethod
+    def _mas(x: np.ndarray) -> float:
+        T = x.shape[0]
+        if T <= 1:
+            return 0.0
+        win = get_window("hamming", T, fftbins=True).astype(np.float32)
+        spec = np.fft.rfft(x * win, axis=0)
+        amp = np.abs(spec)
+        return float(np.median(amp))
+
+    def _extract_features(self, emg_win: np.ndarray) -> np.ndarray:
+        out = []
+        for ch in range(emg_win.shape[1]):
+            sig = emg_win[:, ch]
+            out.extend([self._rms(sig), self._wl(sig), self._mas(sig)])
+        return np.asarray(out, dtype=np.float32)

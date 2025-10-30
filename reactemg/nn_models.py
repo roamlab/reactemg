@@ -6,6 +6,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import wandb
+import numpy as np
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 
 
 ##############################
@@ -702,3 +704,59 @@ class Any2Any_Model(nn.Module):
                 )
 
             return emg_output, action_output
+
+
+#############################
+############# LDA ############
+#############################
+class LDA_Model(nn.Module):
+    """
+    Thin wrapper around scikit-learn LinearDiscriminantAnalysis so it
+    looks like a torch.nn.Module in your pipeline.
+
+    Usage:
+      • model.fit_numpy(X, y)  # X: (N, D) float32, y: (N,) int
+      • model.predict_proba_numpy(X) -> (N, num_classes)
+      • forward(x_tensor) -> probabilities as torch.FloatTensor
+      • state_dict() / load_state_dict() store/restore the fitted sklearn object
+    """
+    def __init__(self, num_classes: int, **lda_kwargs):
+        super().__init__()
+        self.num_classes = num_classes
+        # sensible defaults for EMG features
+        default_kwargs = dict(solver="lsqr", shrinkage="auto")
+        default_kwargs.update(lda_kwargs or {})
+        self._sk = LinearDiscriminantAnalysis(**default_kwargs)
+        self._is_fitted = False
+
+    # numpy API for training/eval inside the scikit-learn world
+    def fit_numpy(self, X: np.ndarray, y: np.ndarray):
+        self._sk.fit(X, y)
+        self._is_fitted = True
+
+    def predict_proba_numpy(self, X: np.ndarray) -> np.ndarray:
+        if not self._is_fitted:
+            raise RuntimeError("LDA_Model not fitted yet.")
+        return self._sk.predict_proba(X)
+
+    # torch API used by your pipeline
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (B, D) FloatTensor
+        returns: (B, num_classes) FloatTensor of probabilities
+        """
+        if not self._is_fitted:
+            raise RuntimeError("LDA_Model not fitted yet.")
+        with torch.no_grad():
+            probs = self._sk.predict_proba(x.detach().cpu().numpy())
+            return torch.from_numpy(probs).to(x.device).float()
+
+    # make checkpoints easy
+    def state_dict(self, *args, **kwargs):
+        # torch.save can pickle arbitrary Python objects; store the fitted estimator
+        return {"sklearn_lda": self._sk, "is_fitted": self._is_fitted, "num_classes": self.num_classes}
+
+    def load_state_dict(self, state_dict, strict=True):
+        self._sk = state_dict["sklearn_lda"]
+        self._is_fitted = state_dict.get("is_fitted", True)
+        self.num_classes = state_dict.get("num_classes", self.num_classes)

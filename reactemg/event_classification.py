@@ -774,8 +774,8 @@ def initialize_dataset(
             medfilt_order=args_dict["medfilt_order"],
             noise=0.0,
             hand_choice=args_dict["hand_choice"],
-            inner_window_size=600,
-            use_mav_for_emg=0,
+            inner_window_size=args_dict["inner_window_size"],
+            use_mav_for_emg=args_dict["use_mav_for_emg"],
             # Now the inference-only arguments
             eval_mode=True,
             eval_task=eval_task,

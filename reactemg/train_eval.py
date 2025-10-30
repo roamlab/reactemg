@@ -6,6 +6,8 @@ from torch import nn
 from torch.utils.data import DataLoader, Sampler
 import wandb
 from minlora import get_lora_state_dict, name_is_lora
+import numpy as np
+from sklearn.metrics import log_loss
 
 
 def initialize_training(
@@ -72,6 +74,14 @@ def initialize_training(
             scheduler,
             epochs,
             device,
+            args_dict,
+        )
+    elif model_choice == "lda":
+        train_lda(
+            model,
+            dataset_train,
+            dataset_val,
+            epochs,
             args_dict,
         )
     else:
@@ -1211,3 +1221,96 @@ def train_trahgr(
             'args_dict': args_dict,
         }
         torch.save(save_dict, current_checkpoint_path)
+
+
+################################################
+############### LDA Training ###################
+################################################
+def train_lda(model, dataset_train, dataset_val, epochs, args_dict):
+    """
+    Trains a scikit-learn LDA baseline to map window-level features to the
+    last-timestep action label.
+
+    • Initializes W&B exactly as requested
+    • At each epoch, fits LDA on all training samples, computes
+      cross-entropy (log_loss) on train/val, logs metrics, prints losses,
+      and saves a checkpoint with (model_state_dict, args_dict).
+    • Learning rate and gradient norms are not applicable → logged as 0.0.
+    """
+    # 1) W&B run (exact spec)
+    machine_name = socket.gethostname()
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    args_dict["machine_name"] = machine_name
+    if args_dict.get("exp_name") is not None:
+        exp_name = f"{args_dict['exp_name']}_{timestamp}_{machine_name}"
+    else:
+        exp_name = f"unnamed_{timestamp}_{machine_name}"
+
+    wandb.init(
+        project='ChatEMG_baseline',
+        entity='rsw0',
+        name=exp_name,
+        config=args_dict
+    )
+
+    # 2) Checkpoint dir (exact spec)
+    checkpoint_dir = f"model_checkpoints/{exp_name}"
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    # 3) Collect all data once
+    #    (dataset already standardized using training stats)
+    Xtr, ytr = [], []
+    for i in range(len(dataset_train)):
+        x_i, y_i, _ = dataset_train[i]
+        Xtr.append(x_i.numpy())
+        ytr.append(int(y_i.item()))
+    Xtr = np.asarray(Xtr, dtype=np.float32)
+    ytr = np.asarray(ytr, dtype=np.int64)
+
+    Xval, yval = [], []
+    for i in range(len(dataset_val)):
+        x_i, y_i, _ = dataset_val[i]
+        Xval.append(x_i.numpy())
+        yval.append(int(y_i.item()))
+    Xval = np.asarray(Xval, dtype=np.float32)
+    yval = np.asarray(yval, dtype=np.int64)
+
+    # 4) Epoch loop (fit + evaluate + log + save)
+    for epoch in range(1, epochs + 1):
+        # fit on all training data
+        model.fit_numpy(Xtr, ytr)
+
+        # probabilities
+        p_tr = model.predict_proba_numpy(Xtr)
+        p_va = model.predict_proba_numpy(Xval) if len(Xval) else np.zeros((0, p_tr.shape[1]), dtype=np.float32)
+
+        # losses (cross-entropy)
+        train_loss = float(log_loss(ytr, p_tr, labels=np.arange(p_tr.shape[1])))
+        val_loss   = float(log_loss(yval, p_va, labels=np.arange(p_tr.shape[1]))) if len(yval) else 0.0
+
+        # print per epoch
+        print(f"Epoch {epoch} -> Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+
+        # log to W&B (exact keys)
+        wandb.log({
+            "epoch": epoch,
+            "training_loss": train_loss,
+            "validation_loss": val_loss,
+            "learning_rate": 0.0,
+            "average_gradient_norm": 0.0,
+            "max_gradient_norm": 0.0
+        })
+
+        # checkpoint per epoch (exact structure)
+        current_checkpoint_path = os.path.join(checkpoint_dir, f"epoch_{epoch}.pth")
+        model_info = {
+            "model_state_dict": model.state_dict(),
+        }
+        save_dict = {
+            "model_info": model_info,
+            "args_dict": args_dict,
+        }
+        # torch.save can pickle the sklearn object we put into state_dict()
+        torch.save(save_dict, current_checkpoint_path)
+
+    wandb.finish()

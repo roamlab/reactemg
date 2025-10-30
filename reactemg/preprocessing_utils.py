@@ -9,6 +9,7 @@ from nn_models import (
     LSTM_Model,
     ANN_Model,
     TraHGR_Model,
+    LDA_Model,
 )
 from dataset import (
     Any2Any_Dataset,
@@ -16,6 +17,7 @@ from dataset import (
     LSTM_Dataset,
     ANN_Dataset,
     TraHGR_Dataset,
+    LDA_Dataset,
 )
 
 
@@ -515,6 +517,29 @@ def initialize_dataset(
             file_paths=labeled_csv_paths_val,
             num_classes=args.num_classes,
         )
+    elif args.model_choice == "lda":
+        dataset_train = LDA_Dataset(
+            window_size=args.window_size,
+            offset=args.offset,
+            file_paths=labeled_csv_paths_train,
+            median_filter_size=args.median_filter_size,
+            medfilt_order=args.medfilt_order,
+            hand_choice=args.hand_choice,
+            use_precomputed_stats=False,
+            pad_like_ann=True,
+        )
+        dataset_val = LDA_Dataset(
+            window_size=args.window_size,
+            offset=args.offset,
+            file_paths=labeled_csv_paths_val,
+            median_filter_size=args.median_filter_size,
+            medfilt_order=args.medfilt_order,
+            hand_choice=args.hand_choice,
+            use_precomputed_stats=True,
+            precomputed_mean=dataset_train.mean_,
+            precomputed_std=dataset_train.std_,
+            pad_like_ann=True,
+        )
     else:
         raise ValueError(f"Unknown model_choice: {args.model_choice}")
 
@@ -571,6 +596,8 @@ def initialize_model(args):
             num_filter_orders=3
 
         )
+    elif args.model_choice == "lda":
+        model = LDA_Model(num_classes=args.num_classes)
     else:
         raise ValueError(f"Unknown model_choice: {args.model_choice}")
 
