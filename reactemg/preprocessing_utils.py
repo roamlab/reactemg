@@ -396,8 +396,6 @@ def initialize_dataset(
             scale_factor = effective_mav_length / args.window_size
             args.transition_buffer = max(1, int(args.transition_buffer * scale_factor))
 
-        labeled_csv_paths_train = labeled_csv_paths_train[:10]
-        labeled_csv_paths_val = labeled_csv_paths_val[:10]
         dataset_train = Any2Any_Dataset(
             labeled_csv_paths_train,
             unlabeled_csv_paths_train,

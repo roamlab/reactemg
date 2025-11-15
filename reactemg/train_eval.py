@@ -523,7 +523,7 @@ def train_any2any(
         exp_name = f"unnamed_{timestamp}_{machine_name}"
     wandb.init(
         project=os.environ.get("WANDB_PROJECT", "default_project"),
-        entity="yolandaz",
+        entity=os.environ.get("WANDB_ENTITY", None),
         name=exp_name,
         config=args_dict,
     )
@@ -1247,8 +1247,8 @@ def train_lda(model, dataset_train, dataset_val, epochs, args_dict):
         exp_name = f"unnamed_{timestamp}_{machine_name}"
 
     wandb.init(
-        project='ChatEMG_baseline',
-        entity='rsw0',
+        project=os.environ.get("WANDB_PROJECT", "default_project"),
+        entity=os.environ.get("WANDB_ENTITY", None),
         name=exp_name,
         config=args_dict
     )
