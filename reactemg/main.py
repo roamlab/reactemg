@@ -60,6 +60,7 @@ def main(args):
         val_patient_ids=args.val_patient_ids,
         epn_subset_percentage=args.epn_subset_percentage,
         discard_labeled_percentage=args.discard_labeled_percentage,
+        custom_data_folder=args.custom_data_folder,
     )
 
     # Filter out unlabeled from both train/val, specific to the EMG-EPN-612 dataset
@@ -298,8 +299,15 @@ if __name__ == "__main__":
             "pub_with_roam",
             "pub_with_roam_with_epn",
             "pub_with_epn",
+            "custom_folder",
         ],
         help="Select the dataset used to train the current model",
+    )
+    parser.add_argument(
+        "--custom_data_folder",
+        type=str,
+        default=None,
+        help="Path to custom folder containing .csv or .npy files. Required when dataset_selection='custom_folder'",
     )
     parser.add_argument(
         "--val_patient_ids",
@@ -572,6 +580,10 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+
+    # Custom folder safety check
+    if args.dataset_selection == "custom_folder" and args.custom_data_folder is None:
+        parser.error("--dataset_selection is custom_folder, but no --custom_data_folder is provided.")
 
     # LoRA safety check
     if args.use_lora == 1 and args.saved_checkpoint_pth is None:

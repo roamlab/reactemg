@@ -38,6 +38,7 @@ def get_csv_paths(
     val_patient_ids,
     epn_subset_percentage,
     discard_labeled_percentage,
+    custom_data_folder=None,
 ):
     """
     Construct dataset paths
@@ -79,6 +80,37 @@ def get_csv_paths(
 
     if val_patient_ids is None:
         val_patient_ids = []
+
+    # =========================================================
+    # MODE: "custom_folder"
+    #   - Load all .csv and .npy files from the specified folder
+    #   - Use the same files for both training and validation
+    #     (avoids empty validation dataset issues)
+    # =========================================================
+    if dataset_selection == "custom_folder":
+        if custom_data_folder is None:
+            raise ValueError("dataset_selection is 'custom_folder' but custom_data_folder is None")
+
+        if not os.path.isdir(custom_data_folder):
+            raise ValueError(f"Custom data folder does not exist: {custom_data_folder}")
+
+        # Gather all .csv and .npy files from the custom folder (recursive)
+        all_paths = []
+        csv_files = glob.glob(os.path.join(custom_data_folder, "**", "*.csv"), recursive=True)
+        npy_files = glob.glob(os.path.join(custom_data_folder, "**", "*.npy"), recursive=True)
+        all_paths.extend(csv_files)
+        all_paths.extend(npy_files)
+
+        # Sort for reproducibility
+        all_paths.sort()
+
+        # Use same files for both training and validation
+        train_paths = all_paths
+        val_paths = all_paths
+
+        print(f"[custom_folder] Found {len(all_paths)} files in {custom_data_folder}")
+        print(f"[custom_folder] Using same {len(all_paths)} files for both training and validation")
+        return train_paths, val_paths
 
     # =========================================================
     # MODE: "pub_with_epn"
