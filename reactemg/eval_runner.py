@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 from pathlib import Path
+from collections import Counter
+from datetime import datetime
+import json
 import numpy as np
+import re
 import event_classification as ec
 
 # ------------------------------------------------------------------
@@ -9,9 +13,9 @@ import event_classification as ec
 # find . -maxdepth 1 -type d -name '*LOSO*' -printf '"%P",\n'
 # ------------------------------------------------------------------
 model_folders = [
-    # TODO
 ]
 
+"""
 # No lookahead
 COMMON_KWARGS = dict(
     eval_batch_size=64,
@@ -33,10 +37,10 @@ COMMON_KWARGS = dict(
     verbose=1,
     model_choice="any2any",
     sample_range=None,
+    strict_transition=0,
 )
-
-
 """
+
 # With lookahead
 COMMON_KWARGS = dict(
     eval_batch_size=64,
@@ -47,7 +51,7 @@ COMMON_KWARGS = dict(
     mask_type="poisson",
     stride=1,
     files_or_dirs=["../data/ROAM_EMG"],
-    allow_relax=0,
+    allow_relax=1,
     lookahead=50,
     weight_max_factor=1.0,
     likelihood_format="logits",
@@ -58,31 +62,145 @@ COMMON_KWARGS = dict(
     verbose=1,
     model_choice="any2any",
     sample_range=None,
+    strict_transition=0,
 )
-"""
 
-event_accs = []
-raw_accs = []
 
-for folder in model_folders:
-    ckpt = Path("model_checkpoints") / folder / "epoch_4.pth"
-    print(f"→ evaluating {ckpt}")
+def extract_subject_id(folder_name):
+    """Extract subject ID (e.g., 's1', 's12') from folder name."""
+    match = re.search(r"LOSO_(s\d+)", folder_name)
+    return match.group(1) if match else folder_name
 
-    evt_acc, raw_acc = ec.main(
-        saved_checkpoint_pth=str(ckpt),
-        **COMMON_KWARGS,
-    )
 
-    event_accs.append(evt_acc)
-    raw_accs.append(raw_acc)
+def main():
+    # Per-subject tracking
+    per_subject_results = []
 
-event_mean = np.mean(event_accs)
-event_std = np.std(event_accs, ddof=1)
-raw_mean = np.mean(raw_accs)
-raw_std = np.std(raw_accs, ddof=1)
+    # Aggregate failure reasons across all subjects
+    aggregate_reasons = Counter()
 
-print("\n=========== FINAL SUMMARY ===========")
-print(f"Subjects evaluated : {len(model_folders)}")
-print(f"Transition Accuracy (μ±σ): {event_mean:.4f} ± {event_std:.4f}")
-print(f"Raw Accuracy        (μ±σ): {raw_mean:.4f} ± {raw_std:.4f}")
-print("=====================================")
+    for folder in model_folders:
+        ckpt = Path("model_checkpoints") / folder / "epoch_4.pth"
+        subject_id = extract_subject_id(folder)
+        print(f"→ evaluating {subject_id}: {ckpt}")
+
+        evt_acc, raw_acc, reason_counter = ec.main(
+            saved_checkpoint_pth=str(ckpt),
+            **COMMON_KWARGS,
+        )
+
+        # Store per-subject results
+        per_subject_results.append({
+            "subject_id": subject_id,
+            "folder": folder,
+            "transition_accuracy": evt_acc,
+            "raw_accuracy": raw_acc,
+            "failure_reasons": dict(reason_counter),
+        })
+
+        # Aggregate failure reasons
+        aggregate_reasons.update(reason_counter)
+
+    # Compute statistics
+    event_accs = [r["transition_accuracy"] for r in per_subject_results]
+    raw_accs = [r["raw_accuracy"] for r in per_subject_results]
+
+    event_mean = np.mean(event_accs)
+    event_std = np.std(event_accs, ddof=1)
+    raw_mean = np.mean(raw_accs)
+    raw_std = np.std(raw_accs, ddof=1)
+
+    # Print summary to console
+    print("\n=========== FINAL SUMMARY ===========")
+    print(f"Subjects evaluated : {len(model_folders)}")
+    print(f"Transition Accuracy (μ±σ): {event_mean:.4f} ± {event_std:.4f}")
+    print(f"Raw Accuracy        (μ±σ): {raw_mean:.4f} ± {raw_std:.4f}")
+    print("\n--- Aggregated Failure Categories ---")
+    total_transitions = sum(aggregate_reasons.values())
+    for reason, count in sorted(aggregate_reasons.items(), key=lambda x: -x[1]):
+        pct = 100 * count / total_transitions if total_transitions > 0 else 0
+        print(f"  {reason}: {count} ({pct:.1f}%)")
+    print("=====================================")
+
+    # Save comprehensive summary to file
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    lookahead = COMMON_KWARGS.get("lookahead", 0)
+    summary_dir = Path("output")
+    summary_dir.mkdir(exist_ok=True)
+
+    # Text summary
+    strict_mode = COMMON_KWARGS.get("strict_transition", 0)
+    txt_path = summary_dir / f"batch_eval_summary_LA{lookahead}_{timestamp}.txt"
+    with open(txt_path, "w") as f:
+        f.write("=" * 60 + "\n")
+        f.write("BATCH LOSO EVALUATION SUMMARY\n")
+        f.write(f"Timestamp: {timestamp}\n")
+        f.write(f"Lookahead: {lookahead}\n")
+        f.write(f"Strict Transition: {bool(strict_mode)}\n")
+        f.write("=" * 60 + "\n\n")
+
+        f.write("=== Overall Statistics ===\n")
+        f.write(f"Subjects evaluated: {len(model_folders)}\n")
+        f.write(f"Transition Accuracy (μ±σ): {event_mean:.4f} ± {event_std:.4f}\n")
+        f.write(f"Raw Accuracy        (μ±σ): {raw_mean:.4f} ± {raw_std:.4f}\n")
+        f.write(f"Total Transitions: {total_transitions}\n\n")
+
+        f.write("=== Aggregated Failure Categories ===\n")
+        for reason, count in sorted(aggregate_reasons.items(), key=lambda x: -x[1]):
+            pct = 100 * count / total_transitions if total_transitions > 0 else 0
+            f.write(f"  {reason}: {count} ({pct:.1f}%)\n")
+        f.write("\n")
+
+        f.write("=== Per-Subject Results ===\n")
+        f.write(f"{'Subject':<10} {'Trans Acc':>12} {'Raw Acc':>12}\n")
+        f.write("-" * 36 + "\n")
+        for r in per_subject_results:
+            f.write(f"{r['subject_id']:<10} {r['transition_accuracy']:>12.4f} {r['raw_accuracy']:>12.4f}\n")
+        f.write("\n")
+
+        f.write("=== Per-Subject Failure Breakdown ===\n")
+        for r in per_subject_results:
+            f.write(f"\n{r['subject_id']}:\n")
+            subject_total = sum(r["failure_reasons"].values())
+            for reason, count in sorted(r["failure_reasons"].items(), key=lambda x: -x[1]):
+                pct = 100 * count / subject_total if subject_total > 0 else 0
+                f.write(f"    {reason}: {count} ({pct:.1f}%)\n")
+
+        f.write("\nEnd of summary.\n")
+
+    print(f"\nText summary saved to: {txt_path}")
+
+    # JSON summary (for programmatic access)
+    json_path = summary_dir / f"batch_eval_summary_LA{lookahead}_{timestamp}.json"
+    strict_transition = COMMON_KWARGS.get("strict_transition", 0)
+    json_data = {
+        "timestamp": timestamp,
+        "config": {
+            "lookahead": lookahead,
+            "buffer_range": COMMON_KWARGS.get("buffer_range"),
+            "stride": COMMON_KWARGS.get("stride"),
+            "allow_relax": COMMON_KWARGS.get("allow_relax"),
+            "maj_vote_range": COMMON_KWARGS.get("maj_vote_range"),
+            "strict_transition": strict_transition,
+        },
+        "overall": {
+            "num_subjects": len(model_folders),
+            "transition_accuracy_mean": event_mean,
+            "transition_accuracy_std": event_std,
+            "raw_accuracy_mean": raw_mean,
+            "raw_accuracy_std": raw_std,
+            "total_transitions": total_transitions,
+        },
+        "aggregated_failure_reasons": dict(aggregate_reasons),
+        "per_subject_results": per_subject_results,
+    }
+    with open(json_path, "w") as f:
+        json.dump(json_data, f, indent=2)
+
+    print(f"JSON summary saved to: {json_path}")
+
+    return event_mean, event_std, raw_mean, raw_std
+
+
+if __name__ == "__main__":
+    main()

@@ -99,12 +99,102 @@ def extract_maintenance_windows(actions, buffer_windows):
     return maintenance_windows
 
 
+def _check_transition_strict(buffer_pred, maintenance_pred, A, B, allow_relax):
+    """
+    Strict transition check: "Once B appears, A must never appear again."
+
+    Returns (is_correct, failure_reason).
+    """
+    if allow_relax == 1:
+        allowed_buffer = {A, B, 0}
+        allowed_after_B = {B, 0}
+        allowed_maintenance = {B, 0}
+    else:
+        allowed_buffer = {A, B}
+        allowed_after_B = {B}
+        allowed_maintenance = {B}
+
+    # Rule 0: Buffer contains only allowed classes
+    unique_buffer = set(np.unique(buffer_pred))
+    if not unique_buffer.issubset(allowed_buffer):
+        return False, "Strict: Buffer has classes outside allowed set."
+
+    # Find first occurrence of B
+    b_indices = np.where(buffer_pred == B)[0]
+    if len(b_indices) == 0:
+        return False, "Strict: No B predicted in buffer."
+
+    first_b_idx = b_indices[0]
+
+    # There must be at least one sample before B (a transition must exist)
+    if first_b_idx == 0:
+        return False, "Strict: No transition to B (B at start of buffer)."
+
+    # Once B appears, only allowed_after_B classes until end of buffer
+    after_first_b = buffer_pred[first_b_idx:]
+    unique_after_b = set(np.unique(after_first_b))
+    if not unique_after_b.issubset(allowed_after_B):
+        return False, "Strict: A appears after first B in buffer."
+
+    # Maintenance check
+    if len(maintenance_pred) > 0:
+        unique_maintenance = set(np.unique(maintenance_pred))
+        if not unique_maintenance.issubset(allowed_maintenance):
+            if allow_relax == 1:
+                return False, "Strict: Maintenance has classes outside {B, 0}."
+            else:
+                return False, "Strict: Maintenance contains A."
+
+    return True, "Successful"
+
+
+def _check_transition_non_strict(buffer_pred, maintenance_pred, A, B, allow_relax):
+    """
+    Original (non-strict) transition check.
+
+    Returns (is_correct, failure_reason).
+    """
+    if allow_relax == 1:
+        allowed_classes_buffer = {A, B, 0}
+    else:
+        allowed_classes_buffer = {A, B}
+
+    unique_buffer_pred = set(np.unique(buffer_pred))
+    if not unique_buffer_pred.issubset(allowed_classes_buffer):
+        return False, "Incorrect: Buffer prediction has classes outside allowed set."
+
+    valid_pred_transition_indices = np.where(
+        (buffer_pred[:-1] == A) & (buffer_pred[1:] == B)
+    )[0]
+    if len(valid_pred_transition_indices) == 0:
+        return False, "Incorrect: No predicted A->B transition in buffer."
+
+    # Maintenance check
+    if len(maintenance_pred) > 0:
+        if allow_relax == 1:
+            allowed_classes_maintenance = {B, 0}
+            unique_maintenance_pred = set(np.unique(maintenance_pred))
+            if not unique_maintenance_pred.issubset(allowed_classes_maintenance):
+                return False, "Incorrect: Maintenance pred has classes outside {B, 0}."
+            if B not in unique_maintenance_pred:
+                return False, "Incorrect: Maintenance window has only 0, no B predicted."
+        else:
+            if not np.all(maintenance_pred == B):
+                return False, "Incorrect: Maintenance window not strictly class B."
+
+    return True, "Successful"
+
+
 def transition_metrics(
-    prediction, ground_truth, buffer_windows, maintenance_windows, allow_relax
+    prediction, ground_truth, buffer_windows, maintenance_windows, allow_relax,
+    strict_transition=False
 ):
     """
     Checks correctness of events, each event = buffer window + maintenance window.
     Returns a transition accuracy in [0..1] and a list of reasons.
+
+    If strict_transition=True, uses stricter checking where once B appears,
+    A must never appear again in the buffer or maintenance window.
     """
     correct_transitions = 0
     total_transitions = 0
@@ -158,71 +248,34 @@ def transition_metrics(
         B = buffer_gt[idx + 1]
 
         # ----------------------------------------------------
-        # 2) Check predicted buffer
-        #    Must contain at least one A->B transition.
-        #    Allowed classes depend on allow_relax.
+        # 2) Check predicted buffer and maintenance
         # ----------------------------------------------------
-        if allow_relax == 1:
-            allowed_classes_buffer = {A, B, 0}
-        else:
-            allowed_classes_buffer = {A, B}
-
-        unique_buffer_pred = set(np.unique(buffer_pred))
-        if not unique_buffer_pred.issubset(allowed_classes_buffer):
-            transition_reasons.append(
-                "Incorrect: Buffer prediction has classes outside allowed set."
-            )
-            continue
-
-        valid_pred_transition_indices = np.where(
-            (buffer_pred[:-1] == A) & (buffer_pred[1:] == B)
-        )[0]
-        if len(valid_pred_transition_indices) == 0:
-            transition_reasons.append(
-                "Incorrect: No predicted A->B transition in buffer."
-            )
-            continue
-
-        # 0-length maintenance windows are considered correct
+        # 0-length maintenance windows: pass empty array to check functions
         if len(maintenance_gt) == 0:
+            maint_pred_for_check = np.array([], dtype=buffer_pred.dtype)
+        else:
+            # Validate maintenance GT
+            unique_maintenance_gt = np.unique(maintenance_gt)
+            if len(unique_maintenance_gt) != 1:
+                raise Exception("Error: Maintenance window GT not a single intent.")
+            gt_maintenance_class = unique_maintenance_gt[0]
+            if gt_maintenance_class != B:
+                raise Exception("Error: maintenance window GT != B.")
+            maint_pred_for_check = maintenance_pred
+
+        # Use strict or non-strict checking
+        if strict_transition:
+            is_correct, reason = _check_transition_strict(
+                buffer_pred, maint_pred_for_check, A, B, allow_relax
+            )
+        else:
+            is_correct, reason = _check_transition_non_strict(
+                buffer_pred, maint_pred_for_check, A, B, allow_relax
+            )
+
+        transition_reasons.append(reason)
+        if is_correct:
             correct_transitions += 1
-            transition_reasons.append("Successful")
-            continue
-
-        # ----------------------------------------------------
-        # 3) Maintenance window must be purely the new class B
-        #    (or B + 0 if allow_relax == 1)
-        # ----------------------------------------------------
-        unique_maintenance_gt = np.unique(maintenance_gt)
-        if len(unique_maintenance_gt) != 1:
-            raise Exception("Error: Maintenance window GT not a single intent.")
-        gt_maintenance_class = unique_maintenance_gt[0]
-        if gt_maintenance_class != B:
-            raise Exception("Error: maintenance window GT != B.")
-
-        if len(maintenance_pred) > 0:
-            if allow_relax == 1:
-                allowed_classes_maintenance = {B, 0}
-                unique_maintenance_pred = set(np.unique(maintenance_pred))
-                if not unique_maintenance_pred.issubset(allowed_classes_maintenance):
-                    transition_reasons.append(
-                        "Incorrect: Maintenance pred has classes outside {B, 0}."
-                    )
-                    continue
-                if B not in unique_maintenance_pred:
-                    transition_reasons.append(
-                        "Incorrect: Maintenance window has only 0, no B predicted."
-                    )
-                    continue
-            else:
-                if not np.all(maintenance_pred == B):
-                    transition_reasons.append(
-                        "Incorrect: Maintenance window not strictly class B."
-                    )
-                    continue
-
-        correct_transitions += 1
-        transition_reasons.append("Successful")
 
     transition_accuracy = (
         (correct_transitions / total_transitions) if total_transitions > 0 else 0.0
@@ -594,6 +647,7 @@ def evaluate_predictions(
     buffer_range,
     saved_checkpoint_pth,
     allow_relax,
+    strict_transition=False,
 ):
     """
     Evaluates using transition_metrics + overall accuracy. Returns a results dictionary.
@@ -608,6 +662,7 @@ def evaluate_predictions(
         buffer_windows,
         maintenance_windows,
         allow_relax,
+        strict_transition=strict_transition,
     )
     overall_accuracy = np.mean(predicted_actions == ground_truth_actions)
     event_counts = len(buffer_windows)
@@ -939,6 +994,7 @@ def process_and_evaluate(
     recog_threshold,
     verbose,
     model_choice,
+    strict_transition=False,
 ):
     """
     Runs inference for a single file, returns:
@@ -1330,6 +1386,7 @@ def process_and_evaluate(
         buffer_range=buffer_range,
         saved_checkpoint_pth=saved_checkpoint_pth,
         allow_relax=allow_relax,
+        strict_transition=strict_transition,
     )
 
     # Plot (if verbose=1)
@@ -1439,6 +1496,7 @@ def main(
     verbose,
     model_choice,
     sample_range=None,
+    strict_transition=False,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device", device)
@@ -1566,6 +1624,7 @@ def main(
             recog_threshold=recog_threshold,
             verbose=verbose,
             model_choice=model_choice,
+            strict_transition=strict_transition,
         )
 
         # Store this file's results
@@ -1742,7 +1801,7 @@ def main(
 
         print(f"File-level details JSON saved to: {details_path}")
 
-    return avg_event_accuracy, avg_raw_accuracy
+    return avg_event_accuracy, avg_raw_accuracy, reason_counter
 
 
 ###############################################################################
@@ -1809,6 +1868,16 @@ if __name__ == "__main__":
             "[start_idx, end_idx). For distributing evaluation across multiple GPUs."
         ),
     )
+    parser.add_argument(
+        "--strict_transition",
+        default=0,
+        type=int,
+        choices=[0, 1],
+        help=(
+            "If 1, use strict transition checking where once B is predicted, "
+            "A must never appear again in buffer or maintenance. Default 0 (non-strict)."
+        ),
+    )
     args = parser.parse_args()
 
     main(
@@ -1832,4 +1901,5 @@ if __name__ == "__main__":
         args.verbose,
         args.model_choice,
         args.sample_range,
+        args.strict_transition,
     )
