@@ -418,15 +418,6 @@ def initialize_dataset(
             raise ValueError(
                 "task_selection is not in increasing order, which is not compatible with __getitem__()"
             )
-        if args.use_mav_for_emg == 1:
-            # compute the effective length
-            # scale down lambda, transition_buffer, etc.
-            effective_mav_length = (
-                args.window_size - args.inner_window_size
-            ) // args.mav_inner_stride + 1
-            args.lambda_poisson = 2
-            scale_factor = effective_mav_length / args.window_size
-            args.transition_buffer = max(1, int(args.transition_buffer * scale_factor))
 
         dataset_train = Any2Any_Dataset(
             labeled_csv_paths_train,
@@ -451,8 +442,6 @@ def initialize_dataset(
             args.medfilt_order,
             args.noise,
             args.hand_choice,
-            args.inner_window_size,
-            args.use_mav_for_emg,
         )
         # Note that for the validation set, we always fix the masks by setting seeded_mask = True
         # seeded_mask controls not just whether the masks are reproducible, but also if training uses a different mask for each sample at every epoch
@@ -481,8 +470,6 @@ def initialize_dataset(
             args.medfilt_order,
             0.0,  # no noise
             args.hand_choice,
-            args.inner_window_size,
-            args.use_mav_for_emg,
         )
 
     elif args.model_choice == "ed_tcn":
@@ -589,14 +576,10 @@ def initialize_model(args):
             args.mask_alignment,
             args.share_pe,
             args.tie_weight,
-            args.use_decoder,
             args.use_input_layernorm,
             args.num_classes,
             args.output_reduction_method,
             args.chunk_size,
-            args.inner_window_size,
-            args.use_mav_for_emg,
-            args.mav_inner_stride,
         )
     elif args.model_choice == "ed_tcn":
         model = EDTCN_Model(

@@ -89,7 +89,6 @@ python3 main.py \
   --val_patient_ids s1 \
   --epn_subset_percentage 1.0 \
   --model_choice any2any \
-  --inner_window_size 600 \
   --exp_name <RUN_ID>
 ```
 
@@ -112,10 +111,10 @@ Enter `2` to use your W&B account, and follow the prompts to provide your API ke
 
 ### Fine-tuning on ROAM-EMG
 
-Fine-tuning follows a leave-one-subject-out (LOSO) protocol. The helper script `finetune_runner.sh` trains a separate model for every subject in the ROAM-EMG dataset. Open `finetune_runner.sh` and set `saved_checkpoint_pth` to be your pre-trained checkpoint path, and start LOSO fine-tuning via:
+Fine-tuning follows a leave-one-subject-out (LOSO) protocol. The helper script `scripts/finetune_runner.sh` trains a separate model for every subject in the ROAM-EMG dataset. Open `scripts/finetune_runner.sh` and set `saved_checkpoint_pth` to be your pre-trained checkpoint path, and start LOSO fine-tuning via:
 
 ```bash
-source finetune_runner.sh
+source scripts/finetune_runner.sh
 ```
 
 ## :bar_chart: Evaluation

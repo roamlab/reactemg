@@ -143,229 +143,108 @@ def compute_parameter_changes(model, initial_lora_params, initial_non_lora_param
     return lora_changes, non_lora_changes
 
 
-def process_batch(batch_data, model, args_dict, device, cost_sensitive_loss):
+def process_batch(batch_data, model, args_dict, device):
     """
-    A unified function for handling both:
-      - Fine-resolution (inner_window_size == window_size), which the dataset returns as 8 items:
-          (emg_window, action_window, masked_emg, masked_actions,
-           mask_positions_emg, mask_positions_actions, task_idx, transition_index)
+    Handles a fine-resolution batch returned by the dataset as 8 items:
+        (emg_window, action_window, masked_emg, masked_actions,
+         mask_positions_emg, mask_positions_actions, task_idx, transition_index)
 
-        'masked_emg' and 'masked_actions' were numeric masked versions
-        from the dataset. But we don't feed them into the model a second time,
-        or else we'd be double-masking the EMG. We'll feed raw data to the model,
-        and then rely on `mask_positions_emg` to tell the model which timesteps to
-        replace with a learned mask token.
-
-      - Coarse-resolution (inner_window_size < window_size), which the dataset returns as 7 items:
-          (emg_window, coarse_action_window, masked_coarse_actions,
-           mask_positions_coarse_emg, mask_positions_coarse_actions, task_idx, transition_index)
-
-        Here, numeric masking for action tokens may happen in the dataset (i.e. masked_coarse_actions),
-        but we only do the "numeric mask" for EMG inside the model (downsample + replace).
-        Then we do the standard expansions to compute MSE/CE at the correct times.
+    'masked_emg' and 'masked_actions' were numeric masked versions
+    from the dataset. But we don't feed them into the model a second time,
+    or else we'd be double-masking the EMG. We'll feed raw data to the model,
+    and then rely on `mask_positions_emg` to tell the model which timesteps to
+    replace with a learned mask token.
 
     It returns:
        emg_loss, action_loss, total_loss, mask_positions_emg, mask_positions_actions
        so the training code can track them or compute how many positions got masked, etc.
     """
 
-    # Check the length of batch_data to see which branch we are in
-    if len(batch_data) == 8:
-        # =============== FINE-RESOLUTION BRANCH ===============
-        (
-            emg_window,  # (B, window_size, 8) -> raw
-            action_window,  # (B, window_size)
-            masked_emg_dataset,  # (B, window_size, 8) -> numeric masked from dataset
-            masked_actions_dataset,  # (B, window_size) -> numeric masked from dataset
-            mask_positions_emg,  # (B, window_size, 8) bool
-            mask_positions_actions,  # (B, window_size) bool
-            task_idx,
-            transition_index,
-        ) = batch_data
+    (
+        emg_window,  # (B, window_size, 8) -> raw
+        action_window,  # (B, window_size)
+        masked_emg_dataset,  # (B, window_size, 8) -> numeric masked from dataset
+        masked_actions_dataset,  # (B, window_size) -> numeric masked from dataset
+        mask_positions_emg,  # (B, window_size, 8) bool
+        mask_positions_actions,  # (B, window_size) bool
+        task_idx,
+        transition_index,
+    ) = batch_data
 
-        emg_window = emg_window.to(device)
-        action_window = action_window.to(device)
-        masked_emg_dataset = masked_emg_dataset.to(device)
-        masked_actions_dataset = masked_actions_dataset.to(device)
+    emg_window = emg_window.to(device)
+    action_window = action_window.to(device)
+    masked_emg_dataset = masked_emg_dataset.to(device)
+    masked_actions_dataset = masked_actions_dataset.to(device)
 
-        mask_positions_emg = mask_positions_emg.to(device)
-        mask_positions_actions = mask_positions_actions.to(device)
-        task_idx = task_idx.to(device)
-        transition_index = transition_index.to(device)
+    mask_positions_emg = mask_positions_emg.to(device)
+    mask_positions_actions = mask_positions_actions.to(device)
+    task_idx = task_idx.to(device)
+    transition_index = transition_index.to(device)
 
-        # 2) Model forward
-        # For the fine-resolution (per timestep branch), do we masking inside the model.
-        # Therefore, we pass raw emg_window and raw action_window
-        # The boolean mask (mask_positions_emg, mask_positions_actions)
-        # will tell the model which positions to replace with the learned mask token.
-        emg_output, action_output = model(
-            emg_window,
-            masked_actions_dataset,
-            task_idx,
-            mask_positions_emg,
-            return_output=False,
-            emg_window=emg_window,
-            action_window=action_window,
-        )
-        # Shapes typically:
-        #   emg_output -> (B, window_size, 8)
-        #   action_output -> (B, window_size, vocab_size), unless chunking or pooling
+    # 2) Model forward
+    # For the fine-resolution (per timestep branch), do we masking inside the model.
+    # Therefore, we pass raw emg_window and raw action_window
+    # The boolean mask (mask_positions_emg, mask_positions_actions)
+    # will tell the model which positions to replace with the learned mask token.
+    emg_output, action_output = model(
+        emg_window,
+        masked_actions_dataset,
+        task_idx,
+        mask_positions_emg,
+        return_output=False,
+        emg_window=emg_window,
+        action_window=action_window,
+    )
+    # Shapes typically:
+    #   emg_output -> (B, window_size, 8)
+    #   action_output -> (B, window_size, vocab_size), unless chunking or pooling
 
-        # 3) Compute EMG Loss by flattening & indexing masked positions
-        #    We want MSE only on the timesteps that were masked,
-        #    i.e. mask_positions_emg == True.
-        B, W, C = emg_output.shape  # (B, window_size, 8)
-        emg_output_flat = emg_output.reshape(B * W, C)  # (B*W, 8)
-        emg_window_flat = emg_window.reshape(B * W, C)  # (B*W, 8)
-        mask_positions_e = mask_positions_emg.reshape(B * W, C)  # bool, same shape
+    # 3) Compute EMG Loss by flattening & indexing masked positions
+    #    We want MSE only on the timesteps that were masked,
+    #    i.e. mask_positions_emg == True.
+    B, W, C = emg_output.shape  # (B, window_size, 8)
+    emg_output_flat = emg_output.reshape(B * W, C)  # (B*W, 8)
+    emg_window_flat = emg_window.reshape(B * W, C)  # (B*W, 8)
+    mask_positions_e = mask_positions_emg.reshape(B * W, C)  # bool, same shape
 
-        # Gather
-        emg_output_masked = emg_output_flat[mask_positions_e]
-        emg_gt_masked = emg_window_flat[mask_positions_e]
+    # Gather
+    emg_output_masked = emg_output_flat[mask_positions_e]
+    emg_gt_masked = emg_window_flat[mask_positions_e]
 
-        if emg_output_masked.numel() > 0:
-            emg_loss = F.mse_loss(emg_output_masked, emg_gt_masked)
-        else:
-            emg_loss = torch.tensor(0.0, device=device, requires_grad=True)
-
-        # 4) Compute Action Loss
-        #    Flatten (B, W, vocab_size) => (B*W, vocab_size).
-        #    Then gather only masked positions where mask_positions_actions == True.
-        B, W, vocab_size = action_output.shape
-        action_output_flat = action_output.reshape(B * W, vocab_size)
-        action_window_flat = action_window.reshape(B * W)
-        mask_positions_a = mask_positions_actions.reshape(B * W)  # bool
-
-        action_output_masked = action_output_flat[mask_positions_a]
-        action_gt_masked = action_window_flat[mask_positions_a]
-
-        if action_output_masked.numel() > 0:
-            if args_dict["cost_sensitive_loss"]:
-                action_loss = cost_sensitive_loss(
-                    action_output_masked, action_gt_masked
-                )
-            else:
-                action_loss = F.cross_entropy(action_output_masked, action_gt_masked)
-        else:
-            action_loss = torch.tensor(0.0, device=device, requires_grad=True)
-
-        # 5) Combine
-        if args_dict["scale_emg_loss"] == 1:
-            total_loss = 100.0 * emg_loss + action_loss
-        else:
-            total_loss = emg_loss + action_loss
-
-        return (
-            emg_loss,
-            action_loss,
-            total_loss,
-            mask_positions_emg,
-            mask_positions_actions,
-        )
-
+    if emg_output_masked.numel() > 0:
+        emg_loss = F.mse_loss(emg_output_masked, emg_gt_masked)
     else:
-        # =============== COARSE-RESOLUTION BRANCH ===============
-        (
-            emg_window,  # (B, window_size, 8) raw
-            coarse_action_window,  # (B, coarse_len)
-            masked_coarse_actions,  # (B, coarse_len), possibly numeric masked for actions
-            mask_positions_coarse_emg,  # (B, coarse_len)
-            mask_positions_coarse_actions,  # (B, coarse_len)
-            task_idx,
-            transition_index,
-        ) = batch_data
+        emg_loss = torch.tensor(0.0, device=device, requires_grad=True)
 
-        # 1) Move to device
-        emg_window = emg_window.to(device)
-        coarse_action_window = coarse_action_window.to(device)
-        masked_coarse_actions = masked_coarse_actions.to(device)
-        mask_positions_coarse_emg = mask_positions_coarse_emg.to(device)
-        mask_positions_coarse_actions = mask_positions_coarse_actions.to(device)
-        task_idx = task_idx.to(device)
-        transition_index = transition_index.to(device)
+    # 4) Compute Action Loss
+    #    Flatten (B, W, vocab_size) => (B*W, vocab_size).
+    #    Then gather only masked positions where mask_positions_actions == True.
+    B, W, vocab_size = action_output.shape
+    action_output_flat = action_output.reshape(B * W, vocab_size)
+    action_window_flat = action_window.reshape(B * W)
+    mask_positions_a = mask_positions_actions.reshape(B * W)  # bool
 
-        # 2) Model forward
-        #    In coarse mode, the model does the strided conv downsample on emg_window,
-        #    then replaces entire sub-windows with a learned mask if mask_positions_coarse_emg == True,
-        #    then upsamples back to (B, window_size, 8).
-        #    Meanwhile, the action branch uses masked_coarse_actions if the dataset masked them.
-        emg_output, action_output = model(
-            emg_window,
-            masked_coarse_actions,
-            task_idx,
-            mask_positions_coarse_emg,
-            return_output=False,
-            emg_window=None,
-            action_window=None,
-        )
-        # => emg_output: (B, window_size, 8)
-        # => action_output: (B, coarse_len, vocab_size)
+    action_output_masked = action_output_flat[mask_positions_a]
+    action_gt_masked = action_window_flat[mask_positions_a]
 
-        # 3) Compute Action Loss at coarse scale
-        B, coarse_len, vocab_size = action_output.shape
-        action_output_flat = action_output.reshape(B * coarse_len, vocab_size)
+    if action_output_masked.numel() > 0:
+        action_loss = F.cross_entropy(action_output_masked, action_gt_masked)
+    else:
+        action_loss = torch.tensor(0.0, device=device, requires_grad=True)
 
-        # Flatten GT
-        coarse_action_gt_flat = coarse_action_window.reshape(B * coarse_len)
+    # 5) Combine
+    if args_dict["scale_emg_loss"] == 1:
+        total_loss = 100.0 * emg_loss + action_loss
+    else:
+        total_loss = emg_loss + action_loss
 
-        # Gather only where mask_positions_coarse_actions is True
-        mask_positions_coarse_actions = mask_positions_coarse_actions.reshape(
-            B * coarse_len
-        )
-        action_output_masked = action_output_flat[mask_positions_coarse_actions]
-        action_gt_masked = coarse_action_gt_flat[mask_positions_coarse_actions]
-
-        if action_output_masked.numel() > 0:
-            if args_dict["cost_sensitive_loss"]:
-                action_loss = cost_sensitive_loss(
-                    action_output_masked, action_gt_masked
-                )
-            else:
-                action_loss = F.cross_entropy(action_output_masked, action_gt_masked)
-        else:
-            action_loss = torch.tensor(0.0, device=device, requires_grad=True)
-
-        # 4) Compute EMG Loss in full resolution
-        #    We only do MSE for sub-windows that were masked. Expand the mask:
-        #    i.e. for each coarse index i, [i*inner_ws : (i+1)*inner_ws] => True if coarse i is masked.
-        B, full_w, c = emg_output.shape  # (B, window_size, 8)
-        raw_mask = torch.zeros((B, full_w), dtype=torch.bool, device=device)
-
-        inner_ws = args_dict["inner_window_size"]
-        for b in range(B):
-            masked_indices = torch.where(mask_positions_coarse_emg[b])[
-                0
-            ]  # e.g. sub-window indices
-            for i_coarse in masked_indices:
-                start_t = i_coarse.item() * inner_ws
-                end_t = start_t + inner_ws
-                raw_mask[b, start_t:end_t] = True
-
-        # Flatten
-        emg_output_flat = emg_output.reshape(B * full_w, c)
-        emg_gt_flat = emg_window.reshape(B * full_w, c)
-
-        emg_output_masked = emg_output_flat[raw_mask.reshape(-1)]
-        emg_gt_masked = emg_gt_flat[raw_mask.reshape(-1)]
-
-        if emg_output_masked.numel() > 0:
-            emg_loss = F.mse_loss(emg_output_masked, emg_gt_masked)
-        else:
-            emg_loss = torch.tensor(0.0, device=device, requires_grad=True)
-
-        # 5) Combine
-        if args_dict["scale_emg_loss"] == 1:
-            total_loss = 100.0 * emg_loss + action_loss
-        else:
-            total_loss = emg_loss + action_loss
-
-        return (
-            emg_loss,
-            action_loss,
-            total_loss,
-            mask_positions_coarse_emg,
-            mask_positions_coarse_actions,
-        )
+    return (
+        emg_loss,
+        action_loss,
+        total_loss,
+        mask_positions_emg,
+        mask_positions_actions,
+    )
 
 
 def train_one_epoch(
@@ -375,7 +254,6 @@ def train_one_epoch(
     scheduler,
     device,
     args_dict,
-    cost_sensitive_loss,
     global_step,
 ):
     """
@@ -398,7 +276,7 @@ def train_one_epoch(
         optimizer.zero_grad()
 
         emg_loss, action_loss, combined_loss, mask_emg, mask_action = process_batch(
-            batch_data, model, args_dict, device, cost_sensitive_loss
+            batch_data, model, args_dict, device
         )
 
         combined_loss.backward()
@@ -423,7 +301,7 @@ def train_one_epoch(
                 print(f"Global Step {global_step}, Learning Rate: {current_lr}")
 
         # Count the number of masked positions in both EMG and actions
-        # Note: shape might be (B, window_size, 8) in fine or (B, coarse_length) in coarse
+        # mask_emg shape (B, window_size, 8), mask_action shape (B, window_size).
         # sum() works fine in both cases:
         masked_count = mask_emg.sum().item() + mask_action.sum().item()
 
@@ -468,7 +346,6 @@ def validate_one_epoch(
     dataloader_val,
     device,
     args_dict,
-    cost_sensitive_loss,
 ):
     """
     Runs one epoch of validation (no gradient updates).
@@ -484,7 +361,7 @@ def validate_one_epoch(
     with torch.no_grad():
         for batch_data in dataloader_val:
             emg_loss, action_loss, combined_loss, mask_emg, mask_action = process_batch(
-                batch_data, model, args_dict, device, cost_sensitive_loss
+                batch_data, model, args_dict, device
             )
 
             masked_count = mask_emg.sum().item() + mask_action.sum().item()
@@ -551,10 +428,6 @@ def train_any2any(
     # Global counter for every step
     global_step = 0
 
-    # Defining cost-sensitive loss
-    # override, not being used
-    cost_sensitive_loss = None
-
     # Train and Validation Loop
     for epoch in range(epochs):
         # Apply updates to the dataset and construct new dataloaders for curriculum learning
@@ -620,7 +493,6 @@ def train_any2any(
             scheduler=scheduler,
             device=device,
             args_dict=args_dict,
-            cost_sensitive_loss=cost_sensitive_loss,
             global_step=global_step,
         )
         # Update global_step from returned dictionary
@@ -645,7 +517,6 @@ def train_any2any(
             dataloader_val=dataloader_val,
             device=device,
             args_dict=args_dict,
-            cost_sensitive_loss=cost_sensitive_loss,
         )
 
         # Print / Log

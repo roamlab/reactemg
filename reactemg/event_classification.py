@@ -17,14 +17,16 @@ from dataset import (
     EDTCN_Dataset,
     LSTM_Dataset,
     ANN_Dataset,
-    TraHGR_Dataset
+    TraHGR_Dataset,
+    LDA_Dataset,
 )
 from nn_models import (
     Any2Any_Model,
     EDTCN_Model,
     LSTM_Model,
     ANN_Model,
-    TraHGR_Model
+    TraHGR_Model,
+    LDA_Model,
 )
 from minlora import add_lora, merge_lora, LoRAParametrization
 from torch.nn.utils import parametrize
@@ -570,15 +572,18 @@ def repeat_chunks(
 ):
     """
     Upsamples a reduced output of shape (B, T_red[, D]) to (B, original_length[, D]),
-    following a specific overlapping window logic:
+    following the placement below (this documents the actual code behaviour;
+    note that timesteps in [inner_window_size, inner_window_size + inner_stride)
+    are left at the upsampled tensor's initial zero value):
 
-      - The 1st label covers timesteps [0 : inner_window_size).
-      - The 2nd label covers timesteps [inner_window_size : inner_window_size + inner_stride).
-      - The 3rd label covers timesteps [inner_window_size + inner_stride : inner_window_size + 2*inner_stride),
-        and so on, until all T_red labels have been assigned.
+      - The 1st label  (i=0) covers [0, inner_window_size).
+      - The 2nd label  (i=1) covers [inner_window_size + inner_stride,
+                                     inner_window_size + 2*inner_stride).
+      - The i-th label (i>=1) covers [inner_window_size + i*inner_stride,
+                                      inner_window_size + (i+1)*inner_stride).
 
-    It's assumed that:
-        inner_window_size + (T_red - 1)*inner_stride == original_length
+    Iteration stops once a label's start_idx reaches or exceeds original_length
+    (any remaining labels with no room are dropped).
 
     Args:
         tensor (torch.Tensor):
@@ -614,11 +619,13 @@ def repeat_chunks(
     # Fill the output according to the described logic
     for i in range(T_red):
         if i == 0:
-            # First label -> covers [0 : inner_window_size)
+            # First label -> covers [0, inner_window_size)
             start_idx = 0
             end_idx = inner_window_size
         else:
-            # i-th label -> covers [inner_window_size + (i-1)*inner_stride : inner_window_size + i*inner_stride)
+            # i-th label (i>=1) -> covers
+            #   [inner_window_size + i*inner_stride,
+            #    inner_window_size + (i+1)*inner_stride)
             start_idx = inner_window_size + (i) * inner_stride
             end_idx = start_idx + inner_stride
 
@@ -829,8 +836,6 @@ def initialize_dataset(
             medfilt_order=args_dict["medfilt_order"],
             noise=0.0,
             hand_choice=args_dict["hand_choice"],
-            inner_window_size=args_dict["inner_window_size"],
-            use_mav_for_emg=args_dict["use_mav_for_emg"],
             # Now the inference-only arguments
             eval_mode=True,
             eval_task=eval_task,
@@ -873,6 +878,19 @@ def initialize_dataset(
             num_classes=args_dict["num_classes"],
             butter_cutoff_hz=args_dict.get("trahgr_butter_cutoff_hz", 90.0),
         )
+    elif model_choice == "lda":
+        dataset = LDA_Dataset(
+            window_size=args_dict["window_size"],
+            offset=stride,
+            file_paths=[csv_path],
+            median_filter_size=args_dict["median_filter_size"],
+            medfilt_order=args_dict["medfilt_order"],
+            hand_choice=args_dict["hand_choice"],
+            use_precomputed_stats=True,
+            precomputed_mean=args_dict["precomputed_mean"],
+            precomputed_std=args_dict["precomputed_std"],
+            pad_like_ann=True,
+        )
     else:
         raise ValueError(f"Unknown model_choice: {model_choice}")
 
@@ -892,14 +910,10 @@ def initialize_model(args_dict, checkpoint, model_choice, device):
             args_dict["mask_alignment"],
             args_dict["share_pe"],
             args_dict["tie_weight"],
-            args_dict["use_decoder"],
             args_dict["use_input_layernorm"],
             args_dict["num_classes"],
             args_dict["output_reduction_method"],
             args_dict["chunk_size"],
-            600,
-            0,
-            1,
         )
         if args_dict["use_lora"] == 1:
             lora_config = {
@@ -942,9 +956,8 @@ def initialize_model(args_dict, checkpoint, model_choice, device):
             num_filter_orders=3
 
         )
-        print("hi")
-
-        
+    elif model_choice == "lda":
+        model = LDA_Model(num_classes=args_dict["num_classes"])
     else:
         raise ValueError(f"Unknown model_choice: {model_choice}")
 
@@ -991,7 +1004,6 @@ def process_and_evaluate(
     maj_vote_range,
     stride,
     epn_eval,
-    recog_threshold,
     verbose,
     model_choice,
     strict_transition=False,
@@ -1001,11 +1013,15 @@ def process_and_evaluate(
       (results_dict, pred_aggregated, gt_aggregated)
     """
 
-    if model_choice == "ann":
-        # We assume dataset_eval.__getitem__ returns (features_48d, label_int, raw_gt_seq)
-        #   features_48d: shape [48], the ANN input features
-        #   label_int:    int label for that window
-        #   raw_gt_seq:   shape [window_size], the ground-truth labels for every timestep in that window
+    if model_choice in ("ann", "lda"):
+        # Both ANN and LDA are single-label-per-window classifiers and their
+        # datasets return the same 3-tuple shape: (features, label_int, raw_gt_seq).
+        #   features:    shape [feat_dim]  (48 for ANN, 24 for LDA)
+        #   label_int:   int label for that window
+        #   raw_gt_seq:  shape [window_size], the ground-truth labels for every timestep in that window
+        # LDA_Model.forward(x) returns (B, num_classes) probabilities while
+        # ANN_Model returns logits; both are reduced via argmax so the aggregation
+        # logic below is shared.
 
         # We create a DataLoader
         dataloader_eval = DataLoader(
@@ -1222,136 +1238,79 @@ def process_and_evaluate(
             for batch_idx, batch_data in enumerate(dataloader_eval):
                 # Forward pass
                 if model_choice == "any2any":
-                    if dataset_eval.window_size == dataset_eval.inner_window_size:
-                        (
-                            emg_window,
-                            action_window,
-                            masked_emg,
-                            masked_actions,
-                            mask_positions_emg,
-                            mask_positions_actions,
-                            task_idx,
-                            transition_index,
-                            untokenized_emg,
-                        ) = batch_data
-                        emg_window = emg_window.to(device)
-                        action_window = action_window.to(device)
-                        masked_emg = masked_emg.to(device)
-                        masked_actions = masked_actions.to(device)
-                        mask_positions_emg = mask_positions_emg.to(device)
-                        mask_positions_actions = mask_positions_actions.to(device)
-                        task_idx = task_idx.to(device)
-                        emg_output, action_output = model(
-                            masked_emg, masked_actions, task_idx, mask_positions_emg
-                        )
-                    else:
-                        (
-                            emg_window,
-                            coarse_action,
-                            masked_coarse_actions,
-                            mask_positions_coarse_emg,
-                            mask_positions_coarse_actions,
-                            task_idx,
-                            transition_index,
-                            untokenized_emg,
-                            action_window,
-                        ) = batch_data
-                        emg_window = emg_window.to(device)
-                        coarse_action = coarse_action.to(device)
-                        masked_coarse_actions = masked_coarse_actions.to(device)
-                        mask_positions_coarse_emg = mask_positions_coarse_emg.to(device)
-                        mask_positions_coarse_actions = (
-                            mask_positions_coarse_actions.to(device)
-                        )
-                        task_idx = task_idx.to(device)
-                        transition_index = transition_index.to(device)
-                        untokenized_emg = untokenized_emg.to(device)
-                        action_window = action_window.to(device)
-
-                        emg_output, action_output = model(
-                            emg_window,
-                            masked_coarse_actions,
-                            task_idx,
-                            mask_positions_coarse_emg,
-                        )
+                    (
+                        emg_window,
+                        action_window,
+                        masked_emg,
+                        masked_actions,
+                        mask_positions_emg,
+                        mask_positions_actions,
+                        task_idx,
+                        transition_index,
+                        untokenized_emg,
+                    ) = batch_data
+                    emg_window = emg_window.to(device)
+                    action_window = action_window.to(device)
+                    masked_emg = masked_emg.to(device)
+                    masked_actions = masked_actions.to(device)
+                    mask_positions_emg = mask_positions_emg.to(device)
+                    mask_positions_actions = mask_positions_actions.to(device)
+                    task_idx = task_idx.to(device)
+                    emg_output, action_output = model(
+                        masked_emg, masked_actions, task_idx, mask_positions_emg
+                    )
                 else:
                     (emg_window, action_window, raw_label_seq) = batch_data
                     emg_window = emg_window.to(device)
                     action_output = model(emg_window)
 
-                if model_choice == "tra_hgr":
-                    current_batch_size = emg_window.shape[0]
-                    predicted_action_tokens = (
-                        torch.argmax(action_output, dim=-1).cpu().numpy()
-                    )
-                    for i in range(current_batch_size):
-                        global_idx = batch_idx * eval_batch_size + i
-                        cur_index = global_idx * stride
-                        if cur_index > total_timesteps:
-                            end_idx = total_timesteps
-                        pred_matrix[global_idx, cur_index] = predicted_action_tokens[i]
-                        gt_matrix[global_idx, cur_index] = raw_label_seq[i, -1]
-                        logits_matrix[global_idx, cur_index, :] = action_output[i]
-                else:
-                    # Upsample if resolution is lower
-                    if action_output.size(1) < args_dict["window_size"]:
-                        if (
-                            model_choice == "any2any"
-                            and dataset_eval.use_mav_for_emg == 0
-                        ):
-                            inner_window_size = args_dict["inner_window_size"]
-                            inner_stride = args_dict["inner_window_size"]
-                        elif (
-                            model_choice == "any2any"
-                            and dataset_eval.use_mav_for_emg == 1
-                        ):
-                            inner_window_size = args_dict["inner_window_size"]
-                            inner_stride = args_dict["mav_inner_stride"]
-                        elif model_choice == "ed_tcn":
-                            inner_window_size = 150
-                            inner_stride = 25
-                        elif model_choice == "lstm":
-                            inner_window_size = 100
-                            inner_stride = 1
-                        else:
-                            raise Exception("model_choice not recognized")
-
-                        action_output = repeat_chunks(
-                            action_output,
-                            args_dict["window_size"],
-                            inner_window_size,
-                            inner_stride,
-                        )
-
-                    # Obtain predicted labels, ground truth, and the logits
-                    # Depending on the type of aggregation, realtime_online_aggregation() will choose to use pred_matrix or logits_matrix
-                    predicted_action_tokens = (
-                        torch.argmax(action_output, dim=-1).cpu().numpy()
-                    )
-                    action_output_vals = action_output.cpu().numpy()
-                    if model_choice == "any2any":
-                        ground_truth_action_tokens = action_window.cpu().numpy()
+                # Upsample if resolution is lower
+                if action_output.size(1) < args_dict["window_size"]:
+                    if model_choice == "ed_tcn":
+                        inner_window_size = 150
+                        inner_stride = 25
+                    elif model_choice == "lstm":
+                        inner_window_size = 100
+                        inner_stride = 1
                     else:
-                        ground_truth_action_tokens = raw_label_seq
+                        raise Exception("model_choice not recognized")
 
-                    # Fill in pred_matrix, gt_matrix, logits_matrix
-                    current_batch_size = emg_window.shape[0]
-                    for i in range(current_batch_size):
-                        global_idx = batch_idx * eval_batch_size + i
-                        start_idx = global_idx * stride
-                        end_idx = start_idx + args_dict["window_size"]
-                        if end_idx > total_timesteps:
-                            end_idx = total_timesteps
+                    action_output = repeat_chunks(
+                        action_output,
+                        args_dict["window_size"],
+                        inner_window_size,
+                        inner_stride,
+                    )
 
-                        pred_matrix[global_idx, start_idx:end_idx] = (
-                            predicted_action_tokens[i, : (end_idx - start_idx)]
-                        )
-                        gt_matrix[global_idx, start_idx:end_idx] = (
-                            ground_truth_action_tokens[i, : (end_idx - start_idx)]
-                        )
-                        logits_matrix[global_idx, start_idx:end_idx, :] = (
-                            action_output_vals[i, : (end_idx - start_idx), :]
-                        )
+                # Obtain predicted labels, ground truth, and the logits
+                # Depending on the type of aggregation, realtime_online_aggregation() will choose to use pred_matrix or logits_matrix
+                predicted_action_tokens = (
+                    torch.argmax(action_output, dim=-1).cpu().numpy()
+                )
+                action_output_vals = action_output.cpu().numpy()
+                if model_choice == "any2any":
+                    ground_truth_action_tokens = action_window.cpu().numpy()
+                else:
+                    ground_truth_action_tokens = raw_label_seq
+
+                # Fill in pred_matrix, gt_matrix, logits_matrix
+                current_batch_size = emg_window.shape[0]
+                for i in range(current_batch_size):
+                    global_idx = batch_idx * eval_batch_size + i
+                    start_idx = global_idx * stride
+                    end_idx = start_idx + args_dict["window_size"]
+                    if end_idx > total_timesteps:
+                        end_idx = total_timesteps
+
+                    pred_matrix[global_idx, start_idx:end_idx] = (
+                        predicted_action_tokens[i, : (end_idx - start_idx)]
+                    )
+                    gt_matrix[global_idx, start_idx:end_idx] = (
+                        ground_truth_action_tokens[i, : (end_idx - start_idx)]
+                    )
+                    logits_matrix[global_idx, start_idx:end_idx, :] = (
+                        action_output_vals[i, : (end_idx - start_idx), :]
+                    )
 
         gt_aggregated = build_gt_sequence(
             gt_matrix,
@@ -1492,7 +1451,6 @@ def main(
     samples_between_prediction,
     maj_vote_range,
     epn_eval,
-    recog_threshold,
     verbose,
     model_choice,
     sample_range=None,
@@ -1621,7 +1579,6 @@ def main(
             maj_vote_range=maj_vote_range,
             stride=stride,
             epn_eval=epn_eval,
-            recog_threshold=recog_threshold,
             verbose=verbose,
             model_choice=model_choice,
             strict_transition=strict_transition,
@@ -1655,24 +1612,6 @@ def main(
         # Add this file's transition reasons to our global list
         all_reasons.extend(results["transition_reasons"])
 
-        # Compute partial (cumulative) results for printing
-        partial_event_accuracy = (
-            (total_correct_events / total_events) if total_events > 0 else 0.0
-        )
-        partial_raw_accuracy = sum_raw_accuracies / (i + 1)
-        partial_event_std = np.std(event_accuracies_per_file)
-        partial_raw_std = np.std(raw_accuracies_per_file)
-
-        # Print partial (cumulative) results
-        print(f"\n** Cumulative Results After File {i + 1}/{len(csv_paths_all)} **")
-        print(
-            f"  Transition Accuracy so far: {partial_event_accuracy:.4f} ± {partial_event_std:.4f}"
-        )
-        print(
-            f"  Raw Accuracy so far:   {partial_raw_accuracy:.4f} ± {partial_raw_std:.4f}"
-        )
-
-        print("--------------------------------------------------------\n")
     # ------------------------------------------------
     # After processing all files, compute final metrics
     # ------------------------------------------------
@@ -1725,7 +1664,20 @@ def main(
     summary_path = os.path.join(summary_dir, summary_filename)
 
     with open(summary_path, "w") as f:
-        f.write("=== Overall Summary ===\n")
+        # Per-Subject statistics first (EPN only — ROAM has no per-subject grouping)
+        if epn_eval == 1 and mean_event_subj is not None:
+            f.write(f"--- Per‑Subject Statistics (N={len(subj_event_means)}) ---\n")
+            f.write(
+                f"Transition Accuracy (avg ± std): "
+                f"{mean_event_subj:.4f} ± {std_event_subj:.4f}\n"
+            )
+            f.write(
+                f"Raw Accuracy (avg ± std): {mean_raw_subj:.4f} ± {std_raw_subj:.4f}\n"
+            )
+            f.write("\n")
+
+        # Per-Event summary (event-weighted accuracy aggregated across all files)
+        f.write("=== Per-Event Summary ===\n")
         f.write(
             f"Transition Accuracy (weighted) (avg ± std): "
             f"{avg_event_accuracy:.4f} ± {std_event_accuracy:.4f}\n"
@@ -1734,20 +1686,10 @@ def main(
             f"Raw Accuracy (average) (avg ± std): "
             f"{avg_raw_accuracy:.4f} ± {std_raw_accuracy:.4f}\n"
         )
-
-        if epn_eval == 1 and mean_event_subj is not None:
-            f.write(f"\n--- Per‑Subject Statistics (N={len(subj_event_means)}) ---\n")
-            f.write(
-                f"Transition Accuracy (avg ± std): "
-                f"{mean_event_subj:.4f} ± {std_event_subj:.4f}\n"
-            )
-            f.write(
-                f"Raw Accuracy (avg ± std): {mean_raw_subj:.4f} ± {std_raw_subj:.4f}\n"
-            )
-
         f.write(f"Total Transition (Event): {total_events}\n\n")
 
-        f.write("=== Distribution of Transition Reasons ===\n")
+        f.write("=== Per-Event Distribution of Transition Reasons ===\n")
+        f.write("(one count per ground-truth transition event, aggregated across all files)\n")
         for reason, count in reason_counter.items():
             f.write(f"   {reason}: {count}\n")
         f.write("\nEnd of summary.\n")
@@ -1844,7 +1786,6 @@ if __name__ == "__main__":
         choices=[0, 1],
         help="If 1, use EPN-based .npy files and compute EPN metrics.",
     )
-    parser.add_argument("--recog_threshold", default=0.5, type=float)
     parser.add_argument(
         "--verbose",
         default=0,
@@ -1897,7 +1838,6 @@ if __name__ == "__main__":
         args.samples_between_prediction,
         args.maj_vote_range,
         args.epn_eval,
-        args.recog_threshold,
         args.verbose,
         args.model_choice,
         args.sample_range,

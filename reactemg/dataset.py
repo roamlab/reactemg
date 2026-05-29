@@ -639,8 +639,6 @@ class Any2Any_Dataset(Dataset):
         medfilt_order,
         noise,
         hand_choice,
-        inner_window_size,
-        use_mav_for_emg,
         eval_mode=False,
         eval_task=None,
         transition_samples_only=False,
@@ -649,12 +647,11 @@ class Any2Any_Dataset(Dataset):
     ):
         """
         This dataset supports both labeled and unlabeled data in csv/numpy format, applies
-        median filtering and rectification, optionally performs ED-TCN-style MAV extraction,
+        median filtering and rectification,
         and prepares data for various tasks (predict action, predict EMG, etc.) with masking.
 
         The dataset can operate in training mode (with curriculum learning over multiple stages)
-        or evaluation mode (with a fixed masking scheme). It also handles transition samples
-        and coarse/fine segmentation of the action labels.
+        or evaluation mode (with a fixed masking scheme). It also handles transition samples.
 
         This dataset is used for both training and simulated online inference
 
@@ -707,10 +704,6 @@ class Any2Any_Dataset(Dataset):
                 Amplitude of uniform noise added to EMG signals (0.0 for no noise).
             hand_choice (str):
                 Which hand's EMG data is being used, "left" or "right" (remaps channels for "left").
-            inner_window_size (int):
-                Size of subwindows for coarse labeling or ED-TCN MAV extraction.
-            use_mav_for_emg (int):
-                If 1, performs MAV extraction in an inner subwindow loop (ED-TCN style).
             eval_mode (bool, optional):
                 If True, dataset is used for evaluation (fixed masking). Defaults to False.
             eval_task (str, optional):
@@ -726,9 +719,9 @@ class Any2Any_Dataset(Dataset):
                 Defaults to "poisson".
 
         Attributes:
-            all_data (List[Tuple[np.ndarray, np.ndarray, int, Optional[np.ndarray]]]):
-                Master list of all loaded samples (EMG, action, transition_index, coarse_label).
-            raw_labeled_data (List[Tuple[np.ndarray, np.ndarray, int, Optional[np.ndarray]]]):
+            all_data (List[Tuple[np.ndarray, np.ndarray, int]]):
+                Master list of all loaded samples (EMG, action, transition_index).
+            raw_labeled_data (List[Tuple[np.ndarray, np.ndarray, int]]):
                 Loaded labeled samples (before augmentation/masking).
             noisy_labeled_data (List[Any]):
                 Not currently used (placeholder for future expansions).
@@ -738,7 +731,7 @@ class Any2Any_Dataset(Dataset):
                 Loaded unlabeled samples (placeholder for future expansions).
             noisy_unlabeled_data (List[Any]):
                 Placeholder list for unlabeled noisy samples.
-            untokenized_data (List[Tuple[np.ndarray, np.ndarray, int, Optional[np.ndarray]]]):
+            untokenized_data (List[Tuple[np.ndarray, np.ndarray, int]]):
                 Stores unmasked data for evaluation/analysis.
 
         Raises:
@@ -769,8 +762,6 @@ class Any2Any_Dataset(Dataset):
         self.num_classes = num_classes
         self.noise_amplitude = noise
         self.hand_choice = hand_choice
-        self.inner_window_size = inner_window_size
-        self.use_mav_for_emg = use_mav_for_emg
 
         self.curriculum_stage = 0
         self.stage_1_weights = stage_1_weights
@@ -868,7 +859,6 @@ class Any2Any_Dataset(Dataset):
                             _emg,
                             _act,
                             _tindex,
-                            _coarse_action,
                         ) = temp_raw_labeled_data[sample_idx]
                         if _tindex != -1:
                             filtered_data.append(temp_raw_labeled_data[sample_idx])
@@ -886,37 +876,6 @@ class Any2Any_Dataset(Dataset):
             self.num_unlabeled_samples = 0
             self.labeled_indices = list(range(self.num_labeled_samples))
             self.unlabeled_indices = []
-
-    # (use_mav_for_emg): helper to do ED-TCN-style MAV
-    def _extract_mav_sequence(
-        self, raw_emg_window, raw_action_window, inner_window_size, inner_stride
-    ):
-        """
-        Extracts MAV with the same logic as ED-TCN:
-          - Slide an inner window of size `inner_window_size` (e.g. 150)
-            with stride `inner_stride` (e.g. 25).
-          - For each subwindow, compute mean(abs(emg)) across 8 channels => shape (8,).
-          - Label is the last raw action in that subwindow.
-          - Return (mav_sequence, action_sequence) each with length = #subwindows.
-        """
-        T = raw_emg_window.shape[0]
-        i_start = 0
-        mav_list = []
-        act_list = []
-        while (i_start + inner_window_size) <= T:
-            i_end = i_start + inner_window_size
-            sub_emg = raw_emg_window[i_start:i_end]
-            channel_mav = np.mean(np.abs(sub_emg), axis=0)
-            label_sub = raw_action_window[i_end - 1]
-            mav_list.append(channel_mav)
-            act_list.append(label_sub)
-            i_start += inner_stride
-
-        if len(mav_list) == 0:
-            return None, None
-        mav_seq = np.stack(mav_list, axis=0)  # (num_subwindows, 8)
-        act_seq = np.array(act_list, dtype=int)  # (num_subwindows,)
-        return mav_seq, act_seq
 
     def multivariate_preprocessing(
         self,
@@ -1010,79 +969,24 @@ class Any2Any_Dataset(Dataset):
         else:
             clipped_data = scaled_data.astype(np.float32)
 
-        # NEW (use_mav_for_emg): If we want to do ED-TCN-style MAV extraction,
-        # we create subwindows for each outer window. Then each sample is smaller in time dimension.
-        if self.embedding_method == "linear_projection" and self.use_mav_for_emg == 1:
-            # We do an outer sliding window of size window_size & offset, then inside that window we do MAV subwindows.
-            N = clipped_data.shape[0]
-            for start in range(0, N - window_size + 1, offset):
-                raw_emg_window = clipped_data[start : start + window_size, :]
-                raw_act_window = action_sequence[start : start + window_size]
+        for start in range(0, clipped_data.shape[0] - window_size + 1, offset):
+            window = clipped_data[start : start + window_size, :]
+            windowed_action_sequence = action_sequence[start : start + window_size]
 
-                # call the MAV function:
-                mav_seq, act_seq = self._extract_mav_sequence(
-                    raw_emg_window,
-                    raw_act_window,
-                    self.inner_window_size,  # interpret as "inner_window_size" for MAV
-                    getattr(self, "mav_inner_stride", 25),
+            transition_list = np.where(
+                windowed_action_sequence[:-1] != windowed_action_sequence[1:]
+            )[0]
+            transition_index = (
+                transition_list[0] if len(transition_list) > 0 else -1
+            )
+
+            extracted_samples.append(
+                (
+                    window.astype(np.float32),
+                    windowed_action_sequence.astype(np.int64),
+                    transition_index,
                 )
-                if mav_seq is None:
-                    continue
-
-                # Now find the transition index in the "act_seq"
-                transition_list = np.where(act_seq[:-1] != act_seq[1:])[0]
-                transition_index = (
-                    transition_list[0] if len(transition_list) > 0 else -1
-                )
-
-                # We'll not do additional sub-subwindows for "coarse" here,
-                # but store the result as if (window_size == len(mav_seq)).
-                # Coarse action is None, to keep consistent shape in the rest of the code.
-                extracted_samples.append(
-                    (
-                        mav_seq.astype(np.float32),  # shape (#subwindows, 8)
-                        act_seq.astype(np.int64),  # shape (#subwindows,)
-                        transition_index,
-                        None,
-                    )
-                )
-
-        else:
-            # main approach (no MAV, either raw or normal coarse):
-            for start in range(0, clipped_data.shape[0] - window_size + 1, offset):
-                window = clipped_data[start : start + window_size, :]
-                windowed_action_sequence = action_sequence[start : start + window_size]
-
-                transition_list = np.where(
-                    windowed_action_sequence[:-1] != windowed_action_sequence[1:]
-                )[0]
-                transition_index = (
-                    transition_list[0] if len(transition_list) > 0 else -1
-                )
-
-                if self.window_size > self.inner_window_size:
-                    coarse_length = self.window_size // self.inner_window_size
-                    coarse_action = np.zeros((coarse_length,), dtype=np.int64)
-                    for i in range(coarse_length):
-                        end_t = (i + 1) * self.inner_window_size
-                        coarse_action[i] = windowed_action_sequence[end_t - 1]
-                    extracted_samples.append(
-                        (
-                            window.astype(np.float32),
-                            windowed_action_sequence.astype(np.int64),
-                            transition_index,
-                            coarse_action,
-                        )
-                    )
-                else:
-                    extracted_samples.append(
-                        (
-                            window.astype(np.float32),
-                            windowed_action_sequence.astype(np.int64),
-                            transition_index,
-                            None,
-                        )
-                    )
+            )
 
         return extracted_samples, extracted_unlabeled_samples
 
@@ -1224,9 +1128,7 @@ class Any2Any_Dataset(Dataset):
                 raw_idx = self.modality_switch_index + (idx - self.num_labeled_samples)
                 task_idx = 3
 
-            emg_window, action_window, transition_index, coarse_action_window = (
-                self.all_data[raw_idx]
-            )
+            emg_window, action_window, transition_index = self.all_data[raw_idx]
 
             if self.noise_amplitude > 0.0:
                 amplitude = self.noise_amplitude
@@ -1307,217 +1209,97 @@ class Any2Any_Dataset(Dataset):
                 "Action_mask"
             ]
 
-            # FINE vs COARSE determination:
-            if coarse_action_window is None:
-                # Fine resolution
-                if task_idx == 0:
-                    masked_actions, mask_positions_actions = self.masking_a2a(
-                        action_window,
-                        mask_percentage,
-                        mask_type,
-                        action_mask_channel_selection,
-                        self.mask_alignment,
-                        self.lambda_poisson,
-                        self.seeded_mask,
-                        action_mask_token,
-                        transition_index,
-                        self.transition_buffer,
-                        use_bert_mask,
-                    )
-                    masked_emg = emg_window
-                    mask_positions_emg = emg_dummy_mask_positions
-                elif task_idx == 1:
-                    masked_emg, mask_positions_emg = self.masking_a2a(
-                        emg_window,
-                        mask_percentage,
-                        mask_type,
-                        emg_mask_channel_selection,
-                        self.mask_alignment,
-                        self.lambda_poisson,
-                        self.seeded_mask,
-                        emg_mask_token,
-                        transition_index,
-                        self.transition_buffer,
-                        use_bert_mask,
-                    )
-                    masked_actions = action_window
-                    mask_positions_actions = action_dummy_mask_positions
-                elif task_idx == 2:
-                    masked_actions, mask_positions_actions = self.masking_a2a(
-                        action_window,
-                        mask_percentage,
-                        mask_type,
-                        action_mask_channel_selection,
-                        self.mask_alignment,
-                        self.lambda_poisson,
-                        self.seeded_mask,
-                        action_mask_token,
-                        transition_index,
-                        self.transition_buffer,
-                        use_bert_mask,
-                    )
-                    masked_emg, mask_positions_emg = self.masking_a2a(
-                        emg_window,
-                        mask_percentage,
-                        mask_type,
-                        emg_mask_channel_selection,
-                        self.mask_alignment,
-                        self.lambda_poisson,
-                        self.seeded_mask,
-                        emg_mask_token,
-                        transition_index,
-                        self.transition_buffer,
-                        use_bert_mask,
-                    )
-                elif task_idx == 3:
-                    masked_emg, mask_positions_emg = self.masking_a2a(
-                        emg_window,
-                        mask_percentage,
-                        mask_type,
-                        emg_mask_channel_selection,
-                        self.mask_alignment,
-                        self.lambda_poisson,
-                        self.seeded_mask,
-                        emg_mask_token,
-                        transition_index,
-                        self.transition_buffer,
-                        use_bert_mask,
-                    )
-                    masked_actions = np.full(action_window.shape, action_mask_token)
-                    mask_positions_actions = action_dummy_mask_positions
-                else:
-                    raise Exception("task_idx not recognized")
-
-                return (
-                    emg_window,
+            if task_idx == 0:
+                masked_actions, mask_positions_actions = self.masking_a2a(
                     action_window,
-                    masked_emg,
-                    masked_actions,
-                    mask_positions_emg,
-                    mask_positions_actions,
-                    task_idx,
+                    mask_percentage,
+                    mask_type,
+                    action_mask_channel_selection,
+                    self.mask_alignment,
+                    self.lambda_poisson,
+                    self.seeded_mask,
+                    action_mask_token,
                     transition_index,
+                    self.transition_buffer,
+                    use_bert_mask,
                 )
-            else:
-                # Coarse resolution
-                local_lambda_poisson = 2
-                factor = self.window_size // self.inner_window_size
-                local_transition_buffer = self.transition_buffer // factor
-                if local_transition_buffer < 1:
-                    local_transition_buffer = 1
-
-                if task_idx == 0:
-                    masked_coarse_actions, mask_positions_coarse_actions = (
-                        self.masking_a2a(
-                            coarse_action_window,
-                            mask_percentage,
-                            mask_type,
-                            [0],
-                            self.mask_alignment,
-                            local_lambda_poisson,
-                            self.seeded_mask,
-                            action_mask_token,
-                            transition_index,
-                            local_transition_buffer,
-                            use_bert_mask=True,
-                        )
-                    )
-                    mask_positions_coarse_emg = np.zeros_like(
-                        coarse_action_window, dtype=bool
-                    )
-                elif task_idx == 1:
-                    dummy_coarse_emg = np.zeros_like(
-                        coarse_action_window, dtype=np.int64
-                    )
-                    _, mask_positions_coarse_emg = self.masking_a2a(
-                        dummy_coarse_emg,
-                        mask_percentage,
-                        mask_type,
-                        [0],
-                        self.mask_alignment,
-                        local_lambda_poisson,
-                        self.seeded_mask,
-                        emg_mask_token,
-                        transition_index,
-                        local_transition_buffer,
-                        use_bert_mask=True,
-                    )
-                    masked_coarse_actions = coarse_action_window
-                    mask_positions_coarse_actions = np.zeros_like(
-                        coarse_action_window, dtype=bool
-                    )
-                elif task_idx == 2:
-                    masked_coarse_actions, mask_positions_coarse_actions = (
-                        self.masking_a2a(
-                            coarse_action_window,
-                            mask_percentage,
-                            mask_type,
-                            [0],
-                            self.mask_alignment,
-                            local_lambda_poisson,
-                            self.seeded_mask,
-                            action_mask_token,
-                            transition_index,
-                            local_transition_buffer,
-                            use_bert_mask=True,
-                        )
-                    )
-                    dummy_coarse_emg = np.zeros_like(
-                        coarse_action_window, dtype=np.int64
-                    )
-                    _, mask_positions_coarse_emg = self.masking_a2a(
-                        dummy_coarse_emg,
-                        mask_percentage,
-                        mask_type,
-                        [0],
-                        self.mask_alignment,
-                        local_lambda_poisson,
-                        self.seeded_mask,
-                        emg_mask_token,
-                        transition_index,
-                        local_transition_buffer,
-                        use_bert_mask=True,
-                    )
-                elif task_idx == 3:
-                    dummy_coarse_emg = np.zeros_like(
-                        coarse_action_window, dtype=np.int64
-                    )
-                    _, mask_positions_coarse_emg = self.masking_a2a(
-                        dummy_coarse_emg,
-                        mask_percentage,
-                        mask_type,
-                        [0],
-                        self.mask_alignment,
-                        local_lambda_poisson,
-                        self.seeded_mask,
-                        emg_mask_token,
-                        transition_index,
-                        local_transition_buffer,
-                        use_bert_mask=True,
-                    )
-                    masked_coarse_actions = np.full_like(
-                        coarse_action_window, fill_value=action_mask_token
-                    )
-                    mask_positions_coarse_actions = np.zeros_like(
-                        coarse_action_window, dtype=bool
-                    )
-                else:
-                    raise Exception("task_idx not recognized")
-
-                return (
+                masked_emg = emg_window
+                mask_positions_emg = emg_dummy_mask_positions
+            elif task_idx == 1:
+                masked_emg, mask_positions_emg = self.masking_a2a(
                     emg_window,
-                    coarse_action_window,
-                    masked_coarse_actions,
-                    mask_positions_coarse_emg,
-                    mask_positions_coarse_actions,
-                    task_idx,
+                    mask_percentage,
+                    mask_type,
+                    emg_mask_channel_selection,
+                    self.mask_alignment,
+                    self.lambda_poisson,
+                    self.seeded_mask,
+                    emg_mask_token,
                     transition_index,
+                    self.transition_buffer,
+                    use_bert_mask,
                 )
+                masked_actions = action_window
+                mask_positions_actions = action_dummy_mask_positions
+            elif task_idx == 2:
+                masked_actions, mask_positions_actions = self.masking_a2a(
+                    action_window,
+                    mask_percentage,
+                    mask_type,
+                    action_mask_channel_selection,
+                    self.mask_alignment,
+                    self.lambda_poisson,
+                    self.seeded_mask,
+                    action_mask_token,
+                    transition_index,
+                    self.transition_buffer,
+                    use_bert_mask,
+                )
+                masked_emg, mask_positions_emg = self.masking_a2a(
+                    emg_window,
+                    mask_percentage,
+                    mask_type,
+                    emg_mask_channel_selection,
+                    self.mask_alignment,
+                    self.lambda_poisson,
+                    self.seeded_mask,
+                    emg_mask_token,
+                    transition_index,
+                    self.transition_buffer,
+                    use_bert_mask,
+                )
+            elif task_idx == 3:
+                masked_emg, mask_positions_emg = self.masking_a2a(
+                    emg_window,
+                    mask_percentage,
+                    mask_type,
+                    emg_mask_channel_selection,
+                    self.mask_alignment,
+                    self.lambda_poisson,
+                    self.seeded_mask,
+                    emg_mask_token,
+                    transition_index,
+                    self.transition_buffer,
+                    use_bert_mask,
+                )
+                masked_actions = np.full(action_window.shape, action_mask_token)
+                mask_positions_actions = action_dummy_mask_positions
+            else:
+                raise Exception("task_idx not recognized")
+
+            return (
+                emg_window,
+                action_window,
+                masked_emg,
+                masked_actions,
+                mask_positions_emg,
+                mask_positions_actions,
+                task_idx,
+                transition_index,
+            )
         else:
             # Inference
-            (emg_window, action_window, transition_index, coarse_action) = (
-                self.all_data[idx]
-            )
+            (emg_window, action_window, transition_index) = self.all_data[idx]
             untokenized_emg = self.untokenized_data[idx][0]
 
             if self.eval_task == "predict_action":
@@ -1537,136 +1319,59 @@ class Any2Any_Dataset(Dataset):
             ]
             use_bert_mask = False
 
-            if self.window_size == self.inner_window_size:
-                if self.eval_task == "predict_action":
-                    masked_actions, mask_positions_actions = self.masking_a2a(
-                        action_window,
-                        1.0,
-                        "end",
-                        [0],
-                        "non-aligned",
+            if self.eval_task == "predict_action":
+                masked_actions, mask_positions_actions = self.masking_a2a(
+                    action_window,
+                    1.0,
+                    "end",
+                    [0],
+                    "non-aligned",
+                    1,
+                    self.seeded_mask,
+                    action_mask_token,
+                    transition_index,
+                    self.transition_buffer,
+                    use_bert_mask,
+                )
+                masked_emg = emg_window
+                mask_positions_emg = emg_dummy_mask_positions
+            elif self.eval_task == "predict_emg":
+                if self.embedding_method == "linear_projection":
+                    masked_emg, mask_positions_emg = self.masking_a2a(
+                        emg_window,
+                        self.eval_mask_percentage,
+                        self.eval_mask_type,
+                        range(emg_window.shape[1]),
+                        "aligned",
                         1,
                         self.seeded_mask,
-                        action_mask_token,
+                        emg_mask_token,
                         transition_index,
                         self.transition_buffer,
                         use_bert_mask,
                     )
-                    masked_emg = emg_window
-                    mask_positions_emg = emg_dummy_mask_positions
-                elif self.eval_task == "predict_emg":
-                    if self.embedding_method == "linear_projection":
-                        masked_emg, mask_positions_emg = self.masking_a2a(
-                            emg_window,
-                            self.eval_mask_percentage,
-                            self.eval_mask_type,
-                            range(emg_window.shape[1]),
-                            "aligned",
-                            1,
-                            self.seeded_mask,
-                            emg_mask_token,
-                            transition_index,
-                            self.transition_buffer,
-                            use_bert_mask,
-                        )
-                        masked_actions = action_window
-                        mask_positions_actions = action_dummy_mask_positions
-                    else:
-                        raise Exception(
-                            "eval_task='predict_emg' but embedding_method not recognized"
-                        )
+                    masked_actions = action_window
+                    mask_positions_actions = action_dummy_mask_positions
                 else:
                     raise Exception(
-                        f"eval_task {self.eval_task} not recognized in inference."
+                        "eval_task='predict_emg' but embedding_method not recognized"
                     )
-
-                return (
-                    emg_window,
-                    action_window,
-                    masked_emg,
-                    masked_actions,
-                    mask_positions_emg,
-                    mask_positions_actions,
-                    task_idx,
-                    transition_index,
-                    untokenized_emg,
-                )
             else:
-                coarse_len = self.window_size // self.inner_window_size
-                local_lambda_poisson = 2
-                local_transition_buffer = self.transition_buffer // coarse_len
-                if local_transition_buffer < 1:
-                    local_transition_buffer = 1
-
-                dummy_coarse_emg = np.zeros((coarse_len,), dtype=np.int64)
-
-                if self.eval_task == "predict_action":
-                    masked_coarse_actions, mask_positions_coarse_actions = (
-                        self.masking_a2a(
-                            coarse_action,
-                            1.0,
-                            "end",
-                            [0],
-                            "non-aligned",
-                            1,
-                            self.seeded_mask,
-                            action_mask_token,
-                            transition_index,
-                            local_transition_buffer,
-                            use_bert_mask,
-                        )
-                    )
-                    mask_positions_coarse_emg = np.zeros((coarse_len,), dtype=bool)
-                elif self.eval_task == "predict_emg":
-                    masked_coarse_emg, mask_positions_coarse_emg = self.masking_a2a(
-                        dummy_coarse_emg,
-                        self.eval_mask_percentage,
-                        self.eval_mask_type,
-                        [0],
-                        "aligned",
-                        local_lambda_poisson,
-                        self.seeded_mask,
-                        emg_mask_token,
-                        transition_index,
-                        local_transition_buffer,
-                        use_bert_mask,
-                    )
-                    masked_coarse_actions = coarse_action
-                    mask_positions_coarse_actions = np.zeros((coarse_len,), dtype=bool)
-                elif self.eval_task == "predict_emg_ss":
-                    _, mask_positions_coarse_emg = self.masking_a2a(
-                        dummy_coarse_emg,
-                        self.eval_mask_percentage,
-                        self.eval_mask_type,
-                        [0],
-                        "aligned",
-                        local_lambda_poisson,
-                        self.seeded_mask,
-                        emg_mask_token,
-                        transition_index,
-                        local_transition_buffer,
-                        use_bert_mask,
-                    )
-                    masked_coarse_actions = np.full_like(
-                        coarse_action, fill_value=action_mask_token
-                    )
-                    mask_positions_coarse_actions = np.zeros((coarse_len,), dtype=bool)
-                else:
-                    raise Exception(
-                        f"eval_task {self.eval_task} not recognized in coarse."
-                    )
-
-                return (
-                    emg_window,
-                    coarse_action,
-                    masked_coarse_actions,
-                    mask_positions_coarse_emg,
-                    mask_positions_coarse_actions,
-                    task_idx,
-                    transition_index,
-                    untokenized_emg,
-                    action_window,
+                raise Exception(
+                    f"eval_task {self.eval_task} not recognized in inference."
                 )
+
+            return (
+                emg_window,
+                action_window,
+                masked_emg,
+                masked_actions,
+                mask_positions_emg,
+                mask_positions_actions,
+                task_idx,
+                transition_index,
+                untokenized_emg,
+            )
 
 
 ############################################################
@@ -1747,13 +1452,6 @@ class LDA_Dataset(Dataset):
 
             # ---- ANN-style padding (optional) ----
             if self.pad_like_ann:
-                if emg.shape[0] < 100:
-                    pass
-                    '''
-                    raise ValueError(
-                        f"The file {path} has fewer than 100 timesteps; cannot build ANN-style pad."
-                    )
-                    '''
                 pad_emg_100 = emg[:100]
                 pad_gt_100 = gt[:100]
                 times = (self.window_size // 100) + 1

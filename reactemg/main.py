@@ -150,42 +150,48 @@ def main(args):
     )
 
     # Optimizer Initialization
-    # LoRA compatible, with warmup and decay
-    total_steps = args.epochs * (len(dataset_train) // args.batch_size)
-    warmup_steps = int(args.warmup_ratio * total_steps)
-    if args.use_lora == 1:
-        print("LORA Activated")
-        lora_parameters = [
-            {"params": list(get_lora_params(model))},
-        ]
-        optimizer = optim.AdamW(lora_parameters, lr=args.learning_rate)
-    else:
-        optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate)
-    if args.use_warmup_and_decay:
-        if args.lr_decay_method == "cosine":
-            scheduler = LambdaLR(
-                optimizer,
-                lambda step: lr_lambda_cosine(step, warmup_steps, total_steps),
-            )
-        elif args.lr_decay_method == "linear":
-            scheduler = LambdaLR(
-                optimizer,
-                lambda step: lr_lambda_linear(step, warmup_steps, total_steps),
-            )
-        elif args.lr_decay_method == "exponential":
-            scheduler = LambdaLR(
-                optimizer,
-                partial(
-                    lr_lambda_exponential,
-                    warmup_steps,
-                    total_steps,
-                    args.exponential_decay_rate,
-                ),
-            )
-        else:
-            raise ValueError("lr_decay_method is not recognized")
-    else:
+    # LoRA compatible, with warmup and decay.
+    # LDA wraps sklearn.LinearDiscriminantAnalysis and has no torch parameters;
+    # train_lda fits via sklearn directly, so skip optimizer/scheduler setup.
+    if args.model_choice == "lda":
+        optimizer = None
         scheduler = None
+    else:
+        total_steps = args.epochs * (len(dataset_train) // args.batch_size)
+        warmup_steps = int(args.warmup_ratio * total_steps)
+        if args.use_lora == 1:
+            print("LORA Activated")
+            lora_parameters = [
+                {"params": list(get_lora_params(model))},
+            ]
+            optimizer = optim.AdamW(lora_parameters, lr=args.learning_rate)
+        else:
+            optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate)
+        if args.use_warmup_and_decay:
+            if args.lr_decay_method == "cosine":
+                scheduler = LambdaLR(
+                    optimizer,
+                    lambda step: lr_lambda_cosine(step, warmup_steps, total_steps),
+                )
+            elif args.lr_decay_method == "linear":
+                scheduler = LambdaLR(
+                    optimizer,
+                    lambda step: lr_lambda_linear(step, warmup_steps, total_steps),
+                )
+            elif args.lr_decay_method == "exponential":
+                scheduler = LambdaLR(
+                    optimizer,
+                    partial(
+                        lr_lambda_exponential,
+                        warmup_steps,
+                        total_steps,
+                        args.exponential_decay_rate,
+                    ),
+                )
+            else:
+                raise ValueError("lr_decay_method is not recognized")
+        else:
+            scheduler = None
 
     # Constructing args dictionary for saving to local
     args_dict = vars(args)
@@ -203,6 +209,9 @@ def main(args):
         args_dict["precomputed_mean"] = dataset_train.global_mean
         args_dict["precomputed_std"] = dataset_train.global_std
     if args.model_choice == "ann":
+        args_dict["precomputed_mean"] = dataset_train.mean_
+        args_dict["precomputed_std"] = dataset_train.std_
+    if args.model_choice == "lda":
         args_dict["precomputed_mean"] = dataset_train.mean_
         args_dict["precomputed_std"] = dataset_train.std_
 
@@ -392,11 +401,6 @@ if __name__ == "__main__":
         help="Setting to True ties the weight of action embedding with action out-projection. If using separate_channel as embedding method, also ties EMG's input embedding and output projection",
     )
     parser.add_argument(
-        "--use_decoder",
-        action="store_true",
-        help="Setting to True creates two decoder blocks that takes EMG embedding and action embedding to generate",
-    )
-    parser.add_argument(
         "--use_lora",
         default=0,
         type=int,
@@ -452,37 +456,9 @@ if __name__ == "__main__":
         help="Setting to True applies training curriculum",
     )
     parser.add_argument(
-        "--use_classifier_loss",
-        action="store_true",
-        help="Setting to True applies an additional auxiliary loss term that functions as a classifier loss on sequence level",
-    )
-    parser.add_argument(
-        "--classifier_loss_weight",
-        default=1,
-        type=float,
-        help="Weighting applied to the classifier loss",
-    )
-    parser.add_argument(
         "--split_unlabeled_batch",
         action="store_true",
         help="Setting to True makes every batch contain either fully labeled or fully unlabeled data. Leaving as False means each batch can potentially contain both labeled and unlabeled data",
-    )
-    parser.add_argument(
-        "--cost_sensitive_loss",
-        action="store_true",
-        help="Setting to True uses the cost matrix to compute a cost-sensitive loss",
-    )
-    parser.add_argument(
-        "--unmask_transition_range",
-        default=0,
-        type=int,
-        help="Setting to a non-zero value unmasks unmask_transition_range timesteps around a transition, meaning that transition timesteps are never backpropagated, which effectively functions as a stop-gradient",
-    )
-    parser.add_argument(
-        "--label_smoothing_range",
-        default=0,
-        type=int,
-        help="Setting to a non-zero value smoothes label_smoothing_range after a transition and label_smoothing_range // 2 range before the transition. Loss computed via KL divergence",
     )
     parser.add_argument(
         "--lambda_poisson", default=7, type=float, help="Average masked span length"
@@ -559,25 +535,6 @@ if __name__ == "__main__":
         choices=[0, 1],
         help="If 1, scale emg loss (MSE) by 100 times to match the scale of the CE loss on actions",
     )
-    parser.add_argument(
-        "--inner_window_size",
-        type=int,
-        required=True,
-        help="If equal to window_size, do old pipeline. Otherwise, must be a divisor of window_size, and less than window_size.",
-    )
-    parser.add_argument(
-        "--use_mav_for_emg",
-        type=int,
-        default=0,
-        choices=[0, 1],
-        help="If 1, extract MAV subwindows (ED-TCN style) for the EMG sequence instead of raw timesteps.",
-    )
-    parser.add_argument(
-        "--mav_inner_stride",
-        type=int,
-        default=25,
-        help="Stride for MAV subwindow when use_mav_for_emg=1, analogous to ED-TCN's inner_stride (e.g. 25).",
-    )
 
     args = parser.parse_args()
 
@@ -594,17 +551,5 @@ if __name__ == "__main__":
     # Model safety check
     if args.model_choice == "any2any" and args.task_selection is None:
         parser.error("--model_choice is any2any, but no --task_selection is provided.")
-    if args.inner_window_size == args.window_size:
-        print("inner_window_size == window_size: Using main pipeline...")
-    elif args.inner_window_size > args.window_size:
-        raise ValueError(
-            f"inner_window_size ({args.inner_window_size}) cannot exceed window_size ({args.window_size})"
-        )
-    elif (args.window_size % args.inner_window_size) != 0:
-        raise ValueError(
-            f"window_size ({args.window_size}) is not divisible by inner_window_size ({args.inner_window_size})"
-        )
-    else:
-        print("inner_window_size < window_size: Activating coarse-resolution method.")
 
     main(args)
