@@ -19,9 +19,9 @@ cd "${SCRIPT_DIR}/.."
 #                      FILL THESE IN
 # ============================================================
 CKPT_ANY2ANY="TODO"
-CKPT_ANN="model_checkpoints/ann_epn_3class_2026-05-26_09-35-05_pc1/epoch_12.pth"
-CKPT_LSTM="model_checkpoints/lstm_epn_3class_2026-05-26_10-34-31_pc1/epoch_12.pth"
-CKPT_ED_TCN="model_checkpoints/ed_tcn_epn_3class_2026-05-26_11-01-41_pc1/epoch_12.pth"
+CKPT_ANN="TODO"
+CKPT_LSTM="TODO"
+CKPT_ED_TCN="TODO"
 CKPT_TRAHGR="TODO"
 CKPT_LDA="TODO"
 # ============================================================

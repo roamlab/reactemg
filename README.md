@@ -73,30 +73,15 @@ export WANDB_MODE=disabled
 
 ### Pre-training with public datasets
 
-Use the following command to pre-train our model on EMG-EPN-612 and other public datasets:
+Pre-train the any2any (ReactEMG) model on EMG-EPN-612 and the other public datasets (3-class):
 
 ```bash
-python3 main.py \
-  --embedding_method linear_projection \
-  --use_input_layernorm \
-  --task_selection 0 1 2 \
-  --offset 30 \
-  --share_pe \
-  --num_classes 3 \
-  --use_warmup_and_decay \
-  --dataset_selection pub_with_epn \
-  --window_size 600 \
-  --val_patient_ids s1 \
-  --epn_subset_percentage 1.0 \
-  --model_choice any2any \
-  --exp_name <RUN_ID>
+bash scripts/roam_emg_1_pretrain.sh
 ```
 
-Replace <RUN_ID> with your desired name, and the script will save checkpoints to `model_checkpoints/<RUN_ID>_<timestamp>_<machine_name>/epoch_<N>.pth`, where `<timestamp>` records the run’s start time and `<machine_name>` identifies the host. Ensure you have write permission where you launch the job.
+This wraps `main.py` with the paper's pre-training configuration and saves checkpoints to `model_checkpoints/any2any_pretrain_3class_<timestamp>_<machine_name>/epoch_<N>.pth`, where `<timestamp>` records the run's start time and `<machine_name>` identifies the host. Ensure you have write permission where you launch the job. The three `scripts/roam_emg_*.sh` scripts form the end-to-end ROAM-EMG pipeline — pre-train (step 1), fine-tune (step 2), evaluate (step 3) — for the main method; run them in order.
 
-You may also initialize weights from a saved checkpoint by adding `--saved_checkpoint_pth path/to/epoch_X.pth` to the training command. If you wish to fine-tune a model via LoRA, provide the flag `--use_lora 1`, in addition to the locally saved checkpoint path.
-
-To train EPN-only models for evaluation purposes, set `--dataset_selection epn_only`
+To reproduce the baselines (ANN, LSTM, ED-TCN, TraHGR, LDA) alongside any2any, use `scripts/pretrain_all_3class.sh` instead. To train EPN-only models for evaluation purposes, use `scripts/train_all_epn_3class.sh` (or `scripts/train_all_epn_6class.sh`). Every script is a thin wrapper over `main.py` — open it to see or adjust the exact flags (e.g. add `--saved_checkpoint_pth path/to/epoch_X.pth` to initialize from a checkpoint, or `--use_lora 1` to fine-tune via LoRA).
 
 If this is your first time using W&B on your machine, you will be prompted to provide credentials:
 
@@ -111,11 +96,20 @@ Enter `2` to use your W&B account, and follow the prompts to provide your API ke
 
 ### Fine-tuning on ROAM-EMG
 
-Fine-tuning follows a leave-one-subject-out (LOSO) protocol. The helper script `scripts/finetune_runner.sh` trains a separate model for every subject in the ROAM-EMG dataset. Open `scripts/finetune_runner.sh` and set `saved_checkpoint_pth` to be your pre-trained checkpoint path, and start LOSO fine-tuning via:
+Fine-tuning follows a leave-one-subject-out (LOSO) protocol: a separate model is trained for each of the 28 subjects in ROAM-EMG, holding that subject out for validation.
 
 ```bash
-source scripts/finetune_runner.sh
+bash scripts/roam_emg_2_finetune.sh
 ```
+
+By default this fine-tunes from the most recent pre-training run of step 1 (its `epoch_11.pth`). To start from a specific checkpoint instead, set `PRETRAIN_CKPT`:
+
+```bash
+PRETRAIN_CKPT=model_checkpoints/any2any_pretrain_3class_<stamp>_<host>/epoch_11.pth \
+  bash scripts/roam_emg_2_finetune.sh
+```
+
+To fine-tune the baselines as well, use `scripts/finetune_all_loso.sh` (fill in the per-architecture checkpoint paths at the top).
 
 ## :bar_chart: Evaluation
 
@@ -127,32 +121,25 @@ During evaluation, we run the model exactly as how it would run online: windows 
 
 ### Run the evaluation
 ```bash
-python3 event_classification.py \
-  --eval_task predict_action \
-  --files_or_dirs ../data/ROAM_EMG \
-  --allow_relax 0 \
-  --buffer_range 200 \
-  --stride 1 \
-  --lookahead 50 \
-  --weight_max_factor 1.0 \
-  --likelihood_format logits \
-  --samples_between_prediction 20 \
-  --maj_vote_range future \
-  --saved_checkpoint_pth <path_to_your_pth_checkpoint> \
-  --epn_eval 0 \
-  --verbose 1 \
-  --model_choice any2any
+bash scripts/roam_emg_3_eval.sh
 ```
-To remove all smoothing, set `--stride 20`, `--lookahead 0`, `--samples_between_prediction 1`, and `--maj_vote_range single`.
 
-To evaluate EPN-only models, set `--files_or_dirs ../data/EMG-EPN-612` and `--epn_eval 1`.
+This auto-discovers the 28 LOSO checkpoints from the previous step and evaluates them, reporting the per-subject mean ± std of transition and raw accuracy. any2any is evaluated twice: once with no smoothing (*no lookahead*) and once with the paper's online smoothing — a 50-sample future majority vote (*lookahead 50*).
+
+To evaluate the baselines as well, use `scripts/eval_all_loso.sh`. To evaluate EPN-only models, use `scripts/eval_all_epn_3class.sh` (or `scripts/eval_all_epn_6class.sh`); fill in the checkpoint paths at the top of those scripts.
 
 ### Output
 
-The evaluation code produces three outputs under `output/`:
-- Summary txt: Overall raw & transition accuracy (mean ± std), event counts, and a tally of failure reasons.
-- Per-file JSON: Metrics plus full ground-truth & prediction sequences for each file.
-- PNG plots: 3-panel figure: 8-channel EMG, ground-truth labels, and model predictions over time.
+Evaluation writes everything under `output/`, at two levels.
+
+**Aggregated** — one `.txt`/`.json` pair per model and smoothing config, written by `eval_runner.py`:
+- `batch_eval_summary_any2any_LA0_<timestamp>.{txt,json}` (no lookahead) and `batch_eval_summary_any2any_LA50_<timestamp>.{txt,json}` (lookahead 50). Each contains the overall transition & raw accuracy (per-subject mean ± std), a per-subject accuracy table, and aggregated + per-subject failure-reason breakdowns. The `.json` mirrors the `.txt` for programmatic access.
+
+**Per-subject** — one folder per checkpoint and smoothing config, written by `event_classification.py`:
+`output/any2any_LOSO_<sN>_<stamp>_<host>_epoch_4_LA<lookahead>/`, each holding:
+- `evaluation_summary_*.txt`: that subject's transition & raw accuracy and a tally of transition reasons.
+- `evaluation_details_*.json`: per-file metrics plus the full ground-truth and prediction sequences.
+- `plots/*.png`: a 3-panel figure per recording — 8-channel EMG, ground-truth labels, and model predictions over time.
 
 ## :memo: Citation
 If you find this codebase useful, consider citing:

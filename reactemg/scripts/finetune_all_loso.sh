@@ -24,10 +24,10 @@ cd "${SCRIPT_DIR}/.."
 # ============================================================
 #                  PRETRAIN CHECKPOINTS — FILL IN
 # ============================================================
-CKPT_ANY2ANY="model_checkpoints/any2any_pretrain_3class_2026-05-27_10-09-19_pc1/epoch_11.pth"
-CKPT_ANN="model_checkpoints/ann_pretrain_3class_2026-05-27_17-06-19_pc1/epoch_12.pth"
-CKPT_LSTM="model_checkpoints/lstm_pretrain_3class_2026-05-27_17-41-24_pc1/epoch_12.pth"
-CKPT_ED_TCN="model_checkpoints/ed_tcn_pretrain_3class_2026-05-27_17-54-39_pc1/epoch_12.pth"
+CKPT_ANY2ANY="TODO"
+CKPT_ANN="TODO"
+CKPT_LSTM="TODO"
+CKPT_ED_TCN="TODO"
 CKPT_TRAHGR="TODO"
 
 # ============================================================

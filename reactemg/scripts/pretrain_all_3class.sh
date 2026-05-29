@@ -1,7 +1,7 @@
 #!/bin/bash
 # Pretrain every model variant on the combined public + EPN dataset
 # ("pub_with_epn") at 3 classes, in preparation for downstream LOSO
-# fine-tuning on ROAM-EMG (see scripts/finetune_runner.sh).
+# fine-tuning on ROAM-EMG (see scripts/finetune_all_loso.sh).
 #
 # Differences vs. scripts/train_all_epn_3class.sh:
 #   * --dataset_selection pub_with_epn  (vs. epn_only):
@@ -145,6 +145,7 @@ python3 main.py \
 echo ""
 echo "All pretrain models trained on ${DATASET_SELECTION} (${NUM_CLASSES}-class)."
 echo "Pretrain checkpoints are under model_checkpoints/<model>_${DATASET_TAG}_${NUM_CLASSES}class_<stamp>_<host>/."
-echo "For downstream LOSO fine-tuning on ROAM-EMG:"
-echo "  edit scripts/finetune_runner.sh's saved_checkpoint_pth to the any2any pretrain checkpoint,"
-echo "  then run: source scripts/finetune_runner.sh"
+echo "For downstream LOSO fine-tuning on ROAM-EMG (all baselines):"
+echo "  set the CKPT_* paths at the top of scripts/finetune_all_loso.sh to the pretrain checkpoints,"
+echo "  then run: bash scripts/finetune_all_loso.sh"
+echo "Or, for the any2any-only pipeline: bash scripts/roam_emg_2_finetune.sh"
