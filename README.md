@@ -83,17 +83,6 @@ This wraps `main.py` with the paper's pre-training configuration and saves check
 
 To reproduce the baselines (ANN, LSTM, ED-TCN, TraHGR, LDA) alongside any2any, use `scripts/pretrain_all_3class.sh` instead. To train EPN-only models for evaluation purposes, use `scripts/train_all_epn_3class.sh` (or `scripts/train_all_epn_6class.sh`). Every script is a thin wrapper over `main.py` — open it to see or adjust the exact flags (e.g. add `--saved_checkpoint_pth path/to/epoch_X.pth` to initialize from a checkpoint, or `--use_lora 1` to fine-tune via LoRA).
 
-If this is your first time using W&B on your machine, you will be prompted to provide credentials:
-
-```text
-wandb: (1) Create a W&B account
-wandb: (2) Use an existing W&B account
-wandb: (3) Don't visualize my results
-wandb: Enter your choice: 
-```
-
-Enter `2` to use your W&B account, and follow the prompts to provide your API key.
-
 ### Fine-tuning on ROAM-EMG
 
 Fine-tuning follows a leave-one-subject-out (LOSO) protocol: a separate model is trained for each of the 28 subjects in ROAM-EMG, holding that subject out for validation.
