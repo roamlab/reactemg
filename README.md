@@ -130,6 +130,10 @@ Evaluation writes everything under `output/`, at two levels.
 - `evaluation_details_*.json`: per-file metrics plus the full ground-truth and prediction sequences.
 - `plots/*.png`: a 3-panel figure per recording — 8-channel EMG, ground-truth labels, and model predictions over time.
 
+## :robot: Live Inference
+
+`reactemg/live_inference.py` is a reference template for running real-time, streaming inference with a trained checkpoint. It depends on robot- and sensor-specific interfaces (e.g., `rospy`, `myhand_interface`) outside this repository, so treat it as a starting point rather than a ready-to-run script.
+
 ## :memo: Citation
 If you find this codebase useful, consider citing:
 
