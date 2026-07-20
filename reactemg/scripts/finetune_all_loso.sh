@@ -14,10 +14,10 @@
 #
 # Leave a checkpoint as "" or "TODO" to skip that architecture.
 #
-# NOTE: LDA is intentionally excluded — sklearn's LinearDiscriminantAnalysis
-# has no warm-start, so a "fine-tuned" LDA is functionally identical to
-# training LDA from scratch on the LOSO fold. If you want per-subject LDA
-# baselines on ROAM, run them separately (without --saved_checkpoint_pth).
+# NOTE: LDA has no warm-start (sklearn LinearDiscriminantAnalysis), so its LOSO
+# "fine-tune" is just a fresh per-subject fit on the ROAM training fold — no
+# pretrain checkpoint is used. It is included below, gated by RUN_LDA (default 0)
+# instead of a checkpoint path. Enabling it does not affect the other models.
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "${SCRIPT_DIR}/.."
 
@@ -31,6 +31,10 @@ CKPT_ED_TCN="TODO"
 CKPT_TRAHGR="TODO"
 
 # ============================================================
+
+# LDA uses no pretrain checkpoint (no warm-start); its LOSO fit is standalone.
+# Set to 1 to also run per-subject LDA fits on ROAM; 0 skips it.
+RUN_LDA="${RUN_LDA:-0}"
 
 NUM_CLASSES=3
 DATASET_SELECTION=roam_only
@@ -144,6 +148,23 @@ ft_trahgr() {
         --exp_name trahgr_LOSO_${pid}
 }
 
+ft_lda() {
+    local pid=$1
+    # LDA has no warm-start: this is a fresh fit on the ROAM LOSO training fold
+    # (all subjects except "$pid"), NOT a fine-tune. No --saved_checkpoint_pth,
+    # and --epochs 1 (the fit is deterministic; eval expects epoch_1.pth).
+    python3 main.py \
+        --model_choice lda \
+        --num_classes $NUM_CLASSES \
+        --dataset_selection $DATASET_SELECTION \
+        --window_size $WINDOW_SIZE \
+        --offset $OFFSET \
+        --epn_subset_percentage $EPN_SUBSET \
+        --val_patient_ids "$pid" \
+        --epochs 1 \
+        --exp_name lda_LOSO_${pid}
+}
+
 # ---------- LOSO loops, one architecture at a time ----------
 
 if should_run "$CKPT_ANY2ANY"; then
@@ -224,6 +245,22 @@ if should_run "$CKPT_TRAHGR"; then
     done
 else
     echo "[skip] trahgr LOSO (CKPT_TRAHGR not set)"
+fi
+
+if [ "$RUN_LDA" = "1" ]; then
+    echo ""
+    echo "############################################################"
+    echo " lda LOSO fit (fresh per-subject fit; no pretrain checkpoint)"
+    echo "############################################################"
+    for pid in "${PATIENT_IDS[@]}"; do
+        echo ""
+        echo "=========================================================="
+        echo " lda LOSO subject = ${pid}"
+        echo "=========================================================="
+        ft_lda "$pid"
+    done
+else
+    echo "[skip] lda LOSO (set RUN_LDA=1 to enable)"
 fi
 
 echo ""

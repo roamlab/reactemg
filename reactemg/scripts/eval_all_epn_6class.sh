@@ -18,12 +18,12 @@ cd "${SCRIPT_DIR}/.."
 # ============================================================
 #                      FILL THESE IN
 # ============================================================
-CKPT_ANY2ANY="TODO"
-CKPT_ANN="TODO"
-CKPT_LSTM="TODO"
-CKPT_ED_TCN="TODO"
-CKPT_TRAHGR="TODO"
-CKPT_LDA="TODO"
+CKPT_ANY2ANY="${CKPT_ANY2ANY:-TODO}"
+CKPT_ANN="${CKPT_ANN:-TODO}"
+CKPT_LSTM="${CKPT_LSTM:-TODO}"
+CKPT_ED_TCN="${CKPT_ED_TCN:-TODO}"
+CKPT_TRAHGR="${CKPT_TRAHGR:-TODO}"
+CKPT_LDA="${CKPT_LDA:-TODO}"
 # ============================================================
 
 eval_no_la() {
@@ -48,7 +48,7 @@ eval_no_la() {
         --maj_vote_range single \
         --weight_max_factor 1.0 \
         --likelihood_format logits \
-        --verbose 0
+        --verbose 1
 }
 
 eval_with_la() {
@@ -73,7 +73,7 @@ eval_with_la() {
         --maj_vote_range future \
         --weight_max_factor 1.0 \
         --likelihood_format logits \
-        --verbose 0
+        --verbose 1
 }
 
 # Helper: skip if path is empty or still set to "TODO"
