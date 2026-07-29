@@ -9,7 +9,6 @@ import random
 import time
 from nn_models import Any2Any_Model
 from minlora import add_lora, merge_lora, LoRAParametrization
-from torch.nn.utils import parametrize
 from functools import partial
 from collections import deque
 from scipy.signal import medfilt
@@ -19,17 +18,6 @@ sys.path.insert(0, parent_dir)
 
 from myhand_interface import MyHandInterface
 
-
-def _safe_merge(layer):
-    if hasattr(layer, "parametrizations"):
-        for k in list(layer.parametrizations.keys()):
-            parametrize.remove_parametrizations(layer, k, leave_parametrized=True)
-
-
-def safe_merge_lora(model):
-    # minLoRA's merge_lora can raise "dictionary changed size during iteration"
-    # on PyTorch >= 2.1, so iterate over a static list of keys instead.
-    model.apply(_safe_merge)
 
 
 class EMGClassification(MyHandInterface):
@@ -66,12 +54,12 @@ class EMGClassification(MyHandInterface):
 
         # Initialize model
         self.model = Any2Any_Model(
-            self.args_dict['embedding_dim'],
-            self.args_dict['nhead'],
-            self.args_dict['dropout'],
-            self.args_dict['activation'],
-            self.args_dict['num_layers'],
-            self.args_dict['window_size'],
+            self.args_dict['embedding_dim'], 
+            self.args_dict['nhead'], 
+            self.args_dict['dropout'], 
+            self.args_dict['activation'], 
+            self.args_dict['num_layers'], 
+            self.args_dict['window_size'], 
             self.args_dict['embedding_method'],
             self.args_dict['mask_alignment'],
             self.args_dict['share_pe'],
@@ -82,29 +70,7 @@ class EMGClassification(MyHandInterface):
             self.args_dict['chunk_size'],
         )
 
-        # If this checkpoint was finetuned with LoRA, recreate the LoRA
-        # parametrizations before loading so the adapter weights have somewhere
-        # to land, then load them and merge into the base weights.
-        # Mirrors initialize_model() in preprocessing_utils.py.
-        use_lora = self.args_dict.get('use_lora', 0) == 1
-        if use_lora:
-            lora_config = {
-                nn.Linear: {
-                    "weight": partial(
-                        LoRAParametrization.from_linear,
-                        rank=self.args_dict['lora_rank'],
-                        lora_alpha=self.args_dict['lora_alpha'],
-                        lora_dropout_p=self.args_dict['lora_dropout_p'],
-                    ),
-                },
-            }
-            add_lora(self.model, lora_config)
-
         self.model.load_state_dict(checkpoint['model_info']['model_state_dict'], strict=False)
-
-        if use_lora:
-            self.model.load_state_dict(checkpoint['lora_state_dict'], strict=False)
-            safe_merge_lora(self.model)
 
         self.model.to(self.device)
 
@@ -358,7 +324,7 @@ if __name__ == "__main__":
                         help="sync target: 'myo' or 'bci'")
     parser.add_argument("--gt_source", type=str, default="button", 
                         help="GT source, e.g. 'button'")
-    parser.add_argument("--lookahead", type=int, default=0,
+    parser.add_argument("--lookahead", type=int, default=40,
                         help="Number of future timesteps to wait for before finalizing label. "
                              "If > 0, we finalize label at time t only after reaching t+lookahead.")
     parser.add_argument("--weight_max_factor", type=float, default=1.5,
