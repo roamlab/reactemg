@@ -244,8 +244,8 @@ class EMGClassification(MyHandInterface):
         sum_logits = torch.zeros(self.num_classes, dtype=torch.float32)
         total_weight = 0.0
 
-        for i in range(t, t + self.lookahead):
-            window_logits = self.logits_storage[i % (self.lookahead)]  # (window_size, num_classes)
+        for i in range(t, t + self.lookahead + 1):
+            window_logits = self.logits_storage[i % (self.lookahead + 1)]  # (window_size, num_classes)
             start_time = i - self.window_size + 1
 
             offset = t - start_time
